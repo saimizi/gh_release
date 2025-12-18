@@ -6,12 +6,15 @@ use std::io::{BufRead, BufReader};
 #[allow(unused_imports)]
 use {
     clap::{ArgAction, Parser},
+    futures::stream::{self, StreamExt},
+    indicatif::{MultiProgress, ProgressBar, ProgressStyle},
     jlogger_tracing::{jdebug, jerror, jinfo, jwarn, JloggerBuilder, LevelFilter, LogTimeFormat},
     reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT},
     reqwest::Client,
     serde::Deserialize,
     std::fs,
     std::path::PathBuf,
+    std::sync::Arc,
 };
 
 #[allow(dead_code)]
@@ -120,6 +123,10 @@ struct Cli {
     #[arg(short = 'n', long = "num", default_value_t = 1)]
     num: usize,
 
+    /// Maximum number of concurrent downloads
+    #[arg(short = 'c', long = "concurrency", default_value_t = 5)]
+    concurrency: usize,
+
     #[arg(short = 'v', long = "verbose", action = ArgAction::Count)]
     verbose: u8,
 }
@@ -191,10 +198,10 @@ async fn main() -> Result<()> {
             jinfo!("Saving assets to: {}", output_dir.display());
         }
 
+        // Collect assets to download with filtering
+        let mut assets_to_download = Vec::new();
         for asset in &release.assets {
             if let Some(name) = &asset.name {
-                jinfo!("Downloading asset: {}", name);
-
                 let mut do_download = true;
                 if let Some(filter) = cli.filter.as_deref() {
                     do_download = false;
@@ -212,53 +219,130 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
-                // For private repositories, use the API endpoint (url) with authentication
-                // For public repositories, browser_download_url works fine
-                // Try API endpoint first if available (works with auth), fallback to browser URL
+                // Get download URL
                 let download_url = asset
                     .url
                     .as_ref()
                     .or(asset.browser_download_url.as_ref())
                     .ok_or_else(|| format!("No download URL available for asset '{}'", name))?;
 
-                jdebug!("Download URL: {}", download_url);
+                // Get asset size for progress bar
+                let size = asset.size.unwrap_or(0);
 
-                // Use Accept: application/octet-stream for API endpoint to get binary content
-                let asset_response = client
-                    .get(download_url)
-                    .header(ACCEPT, "application/octet-stream")
-                    .send()
-                    .await
-                    .map_err(|e| format!("Failed to download asset '{}': {}", name, e))?;
-
-                let status = asset_response.status();
-                if !status.is_success() {
-                    return Err(format!(
-                        "Failed to download asset '{}': HTTP status {}",
-                        name, status
-                    ));
-                }
-
-                let bytes = asset_response
-                    .bytes()
-                    .await
-                    .map_err(|e| format!("Failed to read bytes for asset '{}': {}", name, e))?;
-
-                // Construct the output path
+                // Construct output path
                 let output_path = if let Some(output_dir) = &cli.output_dir {
                     output_dir.join(name)
                 } else {
                     PathBuf::from(name)
                 };
 
-                fs::write(&output_path, &bytes).map_err(|e| {
-                    format!("Failed to save asset '{}': {}", output_path.display(), e)
-                })?;
-                jinfo!(
-                    "Successfully downloaded and saved asset: {}",
-                    output_path.display()
-                );
+                assets_to_download.push((name.clone(), download_url.clone(), output_path, size));
             }
+        }
+
+        if assets_to_download.is_empty() {
+            jinfo!("No assets to download");
+            return Ok(());
+        }
+
+        jinfo!(
+            "Downloading {} asset(s) with concurrency limit of {}",
+            assets_to_download.len(),
+            cli.concurrency
+        );
+
+        // Setup multi-progress bar
+        let multi_progress = Arc::new(MultiProgress::new());
+        let client = Arc::new(client);
+
+        // Parallel download with concurrency limit
+        let download_results: Vec<Result<String>> = stream::iter(assets_to_download)
+            .map(|(name, url, output_path, size)| {
+                let client = Arc::clone(&client);
+                let multi_progress = Arc::clone(&multi_progress);
+
+                async move {
+                    // Create progress bar for this asset
+                    let pb = multi_progress.add(ProgressBar::new(size));
+                    pb.set_style(
+                        ProgressStyle::default_bar()
+                            .template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+                            .unwrap()
+                            .progress_chars("#>-"),
+                    );
+                    pb.set_message(format!("Downloading: {}", name));
+
+                    jdebug!("Download URL: {}", url);
+
+                    // Download with progress tracking
+                    let response = client
+                        .get(&url)
+                        .header(ACCEPT, "application/octet-stream")
+                        .send()
+                        .await
+                        .map_err(|e| format!("Failed to download '{}': {}", name, e))?;
+
+                    let status = response.status();
+                    if !status.is_success() {
+                        pb.finish_with_message(format!("❌ Failed: {} (HTTP {})", name, status));
+                        return Err(format!("HTTP {} for '{}'", status, name));
+                    }
+
+                    // Read bytes with progress
+                    let mut downloaded: u64 = 0;
+                    let mut bytes_vec = Vec::new();
+                    let mut stream = response.bytes_stream();
+
+                    while let Some(chunk_result) = stream.next().await {
+                        let chunk = chunk_result
+                            .map_err(|e| format!("Failed to read chunk for '{}': {}", name, e))?;
+                        bytes_vec.extend_from_slice(&chunk);
+                        downloaded += chunk.len() as u64;
+                        pb.set_position(downloaded);
+                    }
+
+                    // Write to file
+                    fs::write(&output_path, &bytes_vec)
+                        .map_err(|e| format!("Failed to save '{}': {}", output_path.display(), e))?;
+
+                    pb.finish_with_message(format!("✓ Downloaded: {}", name));
+                    Ok(format!("Successfully downloaded: {}", output_path.display()))
+                }
+            })
+            .buffer_unordered(cli.concurrency) // Limit concurrent downloads
+            .collect()
+            .await;
+
+        // Check results and report errors
+        let mut success_count = 0;
+        let mut failed_downloads = Vec::new();
+
+        for result in download_results {
+            match result {
+                Ok(msg) => {
+                    jinfo!("{}", msg);
+                    success_count += 1;
+                }
+                Err(e) => {
+                    jerror!("{}", e);
+                    failed_downloads.push(e);
+                }
+            }
+        }
+
+        jinfo!(
+            "Download complete: {} succeeded, {} failed",
+            success_count,
+            failed_downloads.len()
+        );
+
+        // Return error if any downloads failed (but after attempting all)
+        if !failed_downloads.is_empty() {
+            return Err(format!(
+                "Failed to download {} asset(s): {}",
+                failed_downloads.len(),
+                failed_downloads.join(", ")
+            ));
         }
         return Ok(());
     }
