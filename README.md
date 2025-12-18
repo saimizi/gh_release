@@ -18,10 +18,10 @@ A fast, simple command-line tool for fetching and downloading GitHub release ass
 ### From Source
 
 ```bash
-git clone https://github.com/yourusername/gh_release.git
+git clone https://github.com/saimizi/gh_release.git
 cd gh_release
 cargo build --release
-sudo cp target/release/gh_release /usr/local/bin/
+sudo cp target/release/ghr /usr/local/bin/
 ```
 
 ### Using Cargo
@@ -33,7 +33,7 @@ cargo install --path .
 ## Usage
 
 ```bash
-gh_release [OPTIONS] --repo <REPO>
+ghr [OPTIONS] --repo <REPO>
 ```
 
 ### Required Arguments
@@ -58,70 +58,70 @@ gh_release [OPTIONS] --repo <REPO>
 ### List Latest Release
 
 ```bash
-gh_release -r owner/repo
+ghr -r owner/repo
 ```
 
 ### List Multiple Releases
 
 ```bash
-gh_release -r owner/repo -n 5
+ghr -r owner/repo -n 5
 ```
 
 ### Download Latest Release
 
 ```bash
 # Download all assets from latest release
-gh_release -r owner/repo -d latest
+ghr -r owner/repo -d latest
 
 # Download to specific directory
-gh_release -r owner/repo -d latest -o ./downloads
+ghr -r owner/repo -d latest -o ./downloads
 ```
 
 ### Download Specific Version
 
 ```bash
-gh_release -r owner/repo -d v1.2.3
+ghr -r owner/repo -d v1.2.3
 ```
 
 ### Download with Filtering
 
 ```bash
 # Download only Linux amd64 packages
-gh_release -r owner/repo -d latest -f "linux,amd64"
+ghr -r owner/repo -d latest -f "linux,amd64"
 
 # Download only .deb files
-gh_release -r owner/repo -d v1.0.0 -f ".deb"
+ghr -r owner/repo -d v1.0.0 -f ".deb"
 
 # Multiple filters (downloads assets containing any of these)
-gh_release -r owner/repo -d latest -f "linux,darwin,windows"
+ghr -r owner/repo -d latest -f "linux,darwin,windows"
 ```
 
 ### View Release Information
 
 ```bash
 # Show info about specific version
-gh_release -r owner/repo -i v1.2.3
+ghr -r owner/repo -i v1.2.3
 
 # Show info about multiple versions
-gh_release -r owner/repo -i "v1.2.3,v1.2.2,v1.2.1"
+ghr -r owner/repo -i "v1.2.3,v1.2.2,v1.2.1"
 ```
 
 ### Private Repository Access
 
 ```bash
 # Using token directly
-gh_release -r owner/private-repo -d latest -t ghp_xxxxxxxxxxxx
+ghr -r owner/private-repo -d latest -t ghp_xxxxxxxxxxxx
 
 # Using token from file
 echo "ghp_xxxxxxxxxxxx" > ~/.github_token
-gh_release -r owner/private-repo -d latest -T ~/.github_token
+ghr -r owner/private-repo -d latest -T ~/.github_token
 
 # Using .netrc (automatic)
 # Add to ~/.netrc:
 # machine github.com
 # login your-username
 # password ghp_xxxxxxxxxxxx
-gh_release -r owner/private-repo -d latest
+ghr -r owner/private-repo -d latest
 ```
 
 ### CI/CD Pipeline Examples
@@ -131,7 +131,7 @@ gh_release -r owner/private-repo -d latest
 ```yaml
 - name: Download release asset
   run: |
-    gh_release -r owner/repo -d latest -f "linux,amd64" -o ./bin
+    ghr -r owner/repo -d latest -f "linux,amd64" -o ./bin
 ```
 
 #### GitLab CI
@@ -139,29 +139,29 @@ gh_release -r owner/private-repo -d latest
 ```yaml
 download_release:
   script:
-    - gh_release -r owner/repo -d v1.0.0 -t $GITHUB_TOKEN -o ./artifacts
+    - ghr -r owner/repo -d v1.0.0 -t $GITHUB_TOKEN -o ./artifacts
 ```
 
 #### Jenkins
 
 ```groovy
-sh 'gh_release -r owner/repo -d latest -T /var/jenkins/.github_token'
+sh 'ghr -r owner/repo -d latest -T /var/jenkins/.github_token'
 ```
 
 ## Authentication
 
-gh_release supports three authentication methods (in priority order):
+ghr supports three authentication methods (in priority order):
 
 ### 1. Direct Token (Highest Priority)
 
 ```bash
-gh_release -r owner/repo -t ghp_xxxxxxxxxxxx -d latest
+ghr -r owner/repo -t ghp_xxxxxxxxxxxx -d latest
 ```
 
 ### 2. Token File
 
 ```bash
-gh_release -r owner/repo -T ~/.github_token -d latest
+ghr -r owner/repo -T ~/.github_token -d latest
 ```
 
 The token file should contain only the token string, with optional whitespace.
@@ -179,7 +179,7 @@ password ghp_xxxxxxxxxxxx
 Then run without explicit authentication:
 
 ```bash
-gh_release -r owner/repo -d latest
+ghr -r owner/repo -d latest
 ```
 
 ### 4. Unauthenticated (Fallback)
@@ -187,7 +187,7 @@ gh_release -r owner/repo -d latest
 For public repositories, you can run without authentication:
 
 ```bash
-gh_release -r owner/public-repo -d latest
+ghr -r owner/public-repo -d latest
 ```
 
 **Note:** Unauthenticated requests have lower rate limits (60 requests/hour).
@@ -196,7 +196,7 @@ gh_release -r owner/public-repo -d latest
 
 1. Go to GitHub Settings → Developer settings → Personal access tokens
 2. Click "Generate new token (classic)"
-3. Give it a descriptive name (e.g., "gh_release CLI")
+3. Give it a descriptive name (e.g., "ghr CLI")
 4. Select scopes:
    - `repo` (for private repositories)
    - `public_repo` (for public repositories only)
@@ -209,13 +209,13 @@ Control output detail with the `-v` flag:
 
 ```bash
 # Normal (INFO level)
-gh_release -r owner/repo -d latest
+ghr -r owner/repo -d latest
 
 # Debug output
-gh_release -r owner/repo -d latest -v
+ghr -r owner/repo -d latest -v
 
 # Trace output (very detailed)
-gh_release -r owner/repo -d latest -vv
+ghr -r owner/repo -d latest -vv
 ```
 
 ## Common Use Cases
@@ -224,7 +224,7 @@ gh_release -r owner/repo -d latest -vv
 
 ```bash
 #!/bin/bash
-gh_release -r mycompany/app -d latest -f "linux,amd64" -o /tmp
+ghr -r mycompany/app -d latest -f "linux,amd64" -o /tmp
 sudo dpkg -i /tmp/app_*_amd64.deb
 ```
 
@@ -233,7 +233,7 @@ sudo dpkg -i /tmp/app_*_amd64.deb
 ```bash
 #!/bin/bash
 for platform in linux darwin windows; do
-  gh_release -r owner/repo -d v1.0.0 -f "$platform" -o "./dist/$platform"
+  ghr -r owner/repo -d v1.0.0 -f "$platform" -o "./dist/$platform"
 done
 ```
 
@@ -242,29 +242,29 @@ done
 ```bash
 #!/bin/bash
 current_version="v1.2.3"
-latest=$(gh_release -r owner/repo -n 1 2>&1 | grep "Tag:" | awk '{print $2}')
+latest=$(ghr -r owner/repo -n 1 2>&1 | grep "Tag:" | awk '{print $2}')
 
 if [ "$latest" != "$current_version" ]; then
   echo "New version available: $latest"
-  gh_release -r owner/repo -d latest -o ./updates
+  ghr -r owner/repo -d latest -o ./updates
 fi
 ```
 
 ## Error Handling
 
-gh_release provides clear error messages:
+ghr provides clear error messages:
 
 ```bash
 # Release not found
-$ gh_release -r owner/repo -d v99.99.99
+$ ghr -r owner/repo -d v99.99.99
 Error: Release with tag 'v99.99.99' not found
 
 # Repository not found or access denied
-$ gh_release -r owner/nonexistent
+$ ghr -r owner/nonexistent
 Error: GitHub API request failed with status: 404
 
 # Network error
-$ gh_release -r owner/repo -d latest
+$ ghr -r owner/repo -d latest
 Error: Failed to send request: connection timeout
 ```
 
@@ -283,7 +283,7 @@ cd gh_release
 cargo build --release
 ```
 
-The binary will be at `target/release/gh_release`.
+The binary will be at `target/release/ghr`.
 
 ### Run Tests
 
