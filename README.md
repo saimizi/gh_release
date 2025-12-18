@@ -326,19 +326,3 @@ If you encounter any issues or have questions:
 - Open an issue on [GitHub Issues](https://github.com/yourusername/gh_release/issues)
 - Check existing issues for solutions
 
-## Changelog
-
-### v0.2.0 (2025-12-18)
-- ✨ Added `--output-dir` option to specify download directory
-- ✨ Added support for `-d latest` to download the most recent release
-- 🐛 Fixed private repository asset downloads with token authentication
-- 🧹 Removed unused dependencies (toml, regex, jaq)
-- 📚 Added comprehensive README with examples
-
-### v0.1.0 (Initial Release)
-- ✨ List releases from GitHub repositories
-- ✨ Download specific release assets
-- ✨ Filter assets by name patterns
-- ✨ Multiple authentication methods (token, token file, .netrc)
-- ✨ Display release information
-- ✨ Configurable logging levels
