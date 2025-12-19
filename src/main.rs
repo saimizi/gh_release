@@ -97,22 +97,30 @@ impl Display for Release {
             .unwrap_or("");
         writeln!(
             f,
-            "Release: {} [{} {}]",
+            "{:<12}: {} [{} {}]",
+            "Release",
             self.name.as_deref().unwrap_or("Unnamed"),
             draft,
             prerelease
         )?;
-        writeln!(f, "Tag: {}", self.tag_name.as_deref().unwrap_or("No tag"))?;
         writeln!(
             f,
-            "Created: {}",
+            "{:<12}: {}",
+            "Tag",
+            self.tag_name.as_deref().unwrap_or("No tag")
+        )?;
+        writeln!(
+            f,
+            "{:<12}: {}",
+            "Created",
             Release::date_string(self.created_at.as_deref().unwrap_or("-"))
                 .unwrap_or("-".to_string())
         )?;
 
         writeln!(
             f,
-            "Published: {}",
+            "{:<12}: {}",
+            "Published",
             Release::date_string(self.published_at.as_deref().unwrap_or("-"))
                 .unwrap_or("-".to_string())
         )?;
