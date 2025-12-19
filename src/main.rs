@@ -751,6 +751,7 @@ fn add_auth_header(cli: &Cli, header: &mut HeaderMap) -> Result<()> {
     }
 }
 
+#[derive(Debug)]
 enum SearchPattern {
     UserWithKeyword { username: String, keyword: String },
     UserAllRepos { username: String },
@@ -793,5 +794,181 @@ fn parse_search_pattern(pattern: &str) -> Result<SearchPattern> {
         Ok(SearchPattern::GlobalKeyword {
             keyword: pattern.to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Tests for parse_search_pattern function
+    #[test]
+    fn test_parse_search_pattern_user_with_keyword() {
+        let result = parse_search_pattern("rust-lang/compiler");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            SearchPattern::UserWithKeyword { username, keyword } => {
+                assert_eq!(username, "rust-lang");
+                assert_eq!(keyword, "compiler");
+            }
+            _ => panic!("Expected UserWithKeyword pattern"),
+        }
+    }
+
+    #[test]
+    fn test_parse_search_pattern_user_all_repos() {
+        let result = parse_search_pattern("torvalds/");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            SearchPattern::UserAllRepos { username } => {
+                assert_eq!(username, "torvalds");
+            }
+            _ => panic!("Expected UserAllRepos pattern"),
+        }
+    }
+
+    #[test]
+    fn test_parse_search_pattern_global_keyword() {
+        let result = parse_search_pattern("/kubernetes");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            SearchPattern::GlobalKeyword { keyword } => {
+                assert_eq!(keyword, "kubernetes");
+            }
+            _ => panic!("Expected GlobalKeyword pattern"),
+        }
+    }
+
+    #[test]
+    fn test_parse_search_pattern_no_slash_global() {
+        let result = parse_search_pattern("docker");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            SearchPattern::GlobalKeyword { keyword } => {
+                assert_eq!(keyword, "docker");
+            }
+            _ => panic!("Expected GlobalKeyword pattern"),
+        }
+    }
+
+    #[test]
+    fn test_parse_search_pattern_empty_string() {
+        let result = parse_search_pattern("");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Search pattern cannot be empty");
+    }
+
+    #[test]
+    fn test_parse_search_pattern_whitespace_only() {
+        let result = parse_search_pattern("   ");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Search pattern cannot be empty");
+    }
+
+    #[test]
+    fn test_parse_search_pattern_empty_global_keyword() {
+        let result = parse_search_pattern("/");
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "Keyword cannot be empty for global search"
+        );
+    }
+
+    #[test]
+    fn test_parse_search_pattern_with_leading_trailing_spaces() {
+        let result = parse_search_pattern("  rust-lang/compiler  ");
+        assert!(result.is_ok());
+        match result.unwrap() {
+            SearchPattern::UserWithKeyword { username, keyword } => {
+                assert_eq!(username, "rust-lang");
+                assert_eq!(keyword, "compiler");
+            }
+            _ => panic!("Expected UserWithKeyword pattern"),
+        }
+    }
+
+    // Tests for Repository::summary() method
+    // Note: summary() returns format: "{stars} {privacy} {full_name}"
+    // Privacy indicator: "*" for private, " " for public
+
+    #[test]
+    fn test_repository_summary_public_repo() {
+        let repo = Repository {
+            name: "test-repo".to_string(),
+            full_name: "user/test-repo".to_string(),
+            description: Some("A test repository".to_string()),
+            stargazers_count: 42,
+            html_url: "https://github.com/user/test-repo".to_string(),
+            owner: Owner {
+                login: "user".to_string(),
+            },
+            private: false,
+        };
+
+        let summary = repo.summary();
+        assert!(summary.contains("user/test-repo"));
+        assert!(summary.contains("42"));
+        // Public repos have a space, not "*"
+        assert!(!summary.contains("*user"));
+    }
+
+    #[test]
+    fn test_repository_summary_private_repo() {
+        let repo = Repository {
+            name: "private-repo".to_string(),
+            full_name: "user/private-repo".to_string(),
+            description: Some("A private repository".to_string()),
+            stargazers_count: 100,
+            html_url: "https://github.com/user/private-repo".to_string(),
+            owner: Owner {
+                login: "user".to_string(),
+            },
+            private: true,
+        };
+
+        let summary = repo.summary();
+        // Private repos should have "*" indicator
+        assert!(summary.contains("*"));
+        assert!(summary.contains("user/private-repo"));
+        assert!(summary.contains("100"));
+    }
+
+    #[test]
+    fn test_repository_summary_zero_stars() {
+        let repo = Repository {
+            name: "new-repo".to_string(),
+            full_name: "user/new-repo".to_string(),
+            description: None,
+            stargazers_count: 0,
+            html_url: "https://github.com/user/new-repo".to_string(),
+            owner: Owner {
+                login: "user".to_string(),
+            },
+            private: false,
+        };
+
+        let summary = repo.summary();
+        assert!(summary.contains("user/new-repo"));
+        assert!(summary.contains("0"));
+    }
+
+    #[test]
+    fn test_repository_summary_high_star_count() {
+        let repo = Repository {
+            name: "popular-repo".to_string(),
+            full_name: "org/popular-repo".to_string(),
+            description: Some("Very popular".to_string()),
+            stargazers_count: 123456,
+            html_url: "https://github.com/org/popular-repo".to_string(),
+            owner: Owner {
+                login: "org".to_string(),
+            },
+            private: false,
+        };
+
+        let summary = repo.summary();
+        assert!(summary.contains("org/popular-repo"));
+        assert!(summary.contains("123456"));
     }
 }
