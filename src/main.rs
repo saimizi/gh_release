@@ -31,6 +31,7 @@ struct Asset {
 struct Release {
     name: Option<String>,
     tag_name: Option<String>,
+    created_at: Option<String>,
     published_at: Option<String>,
     draft: Option<bool>,
     prerelease: Option<bool>,
@@ -38,6 +39,29 @@ struct Release {
 }
 
 impl Release {
+    pub fn date_string(date: &str) -> Option<String> {
+        if let Ok(dt) = DateTime::parse_from_rfc3339(date) {
+            Some(
+                dt.with_timezone(&Local)
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string(),
+            )
+        } else {
+            None
+        }
+    }
+    fn date_info(&self) -> String {
+        if let Some(published_at) = Release::date_string(self.published_at.as_deref().unwrap_or(""))
+        {
+            published_at
+        } else if let Some(created_at) =
+            Release::date_string(self.created_at.as_deref().unwrap_or(""))
+        {
+            created_at
+        } else {
+            "Unknown".to_string()
+        }
+    }
     // Additional methods can be added here if needed
     pub fn summary(&self) -> String {
         let types = if self.draft.unwrap_or(false) {
@@ -48,24 +72,14 @@ impl Release {
             "Rel"
         };
 
-        let published_at = self
-            .published_at
-            .as_deref()
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-            .and_then(|dt| {
-                dt.with_timezone(&Local)
-                    .format("%Y-%m-%d %H:%M:%S")
-                    .to_string()
-                    .into()
-            })
-            .unwrap_or_else(|| "Unknown".to_string());
-
+        let name_len = usize::min(15, self.name.as_deref().unwrap_or("Unnamed").len());
+        let tag_len = usize::min(15, self.tag_name.as_deref().unwrap_or("Unnamed").len());
         format!(
             "{:15} {:15} {:5} {:20} {:4}",
-            self.name.as_deref().unwrap_or("Unnamed"),
-            self.tag_name.as_deref().unwrap_or("No tag"),
+            &self.name.as_deref().unwrap_or("Unnamed")[..name_len],
+            &self.tag_name.as_deref().unwrap_or("No tag")[..tag_len],
             types,
-            published_at,
+            self.date_info(),
             self.assets.len()
         )
     }
@@ -89,17 +103,20 @@ impl Display for Release {
             prerelease
         )?;
         writeln!(f, "Tag: {}", self.tag_name.as_deref().unwrap_or("No tag"))?;
-        if let Some(dt) = self
-            .published_at
-            .as_deref()
-            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        {
-            writeln!(
-                f,
-                "Published at: {}",
-                dt.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S")
-            )?;
-        }
+        writeln!(
+            f,
+            "Created: {}",
+            Release::date_string(self.created_at.as_deref().unwrap_or("-"))
+                .unwrap_or("-".to_string())
+        )?;
+
+        writeln!(
+            f,
+            "Published: {}",
+            Release::date_string(self.published_at.as_deref().unwrap_or("-"))
+                .unwrap_or("-".to_string())
+        )?;
+
         writeln!(f, "Assets:")?;
         for asset in &self.assets {
             writeln!(
@@ -397,7 +414,7 @@ async fn main() -> Result<()> {
         let releases = get_release_info(&client, &cli.repo, Some(cli.num)).await?;
         eprintln!(
             "{:4} {:15} {:15} {:5} {:20} {:4}",
-            "No", "Name", "Tag", "Type", "Published", "Assets"
+            "No", "Name", "Tag", "Type", "Published/Created", "Assets"
         );
         for (i, r) in releases.iter().enumerate() {
             eprintln!("{:<4} {}", i + 1, r.summary());
