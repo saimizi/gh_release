@@ -139,6 +139,70 @@ impl Display for Release {
     }
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct SearchResponse {
+    total_count: usize,
+    incomplete_results: bool,
+    items: Vec<Repository>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct Repository {
+    name: String,
+    full_name: String,
+    description: Option<String>,
+    stargazers_count: u32,
+    html_url: String,
+    owner: Owner,
+    private: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct Owner {
+    login: String,
+}
+
+impl Repository {
+    pub fn summary(&self) -> String {
+        // Add lock emoji for private repositories
+        //let privacy_indicator = if self.private { "🔒" } else { "  " };
+        let privacy_indicator = if self.private { "*" } else { " " };
+
+        format!(
+            "{:<7} {:2}{:40}",
+            self.stargazers_count, privacy_indicator, self.full_name
+        )
+    }
+}
+
+impl Display for Repository {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let desc = self.description.as_deref().unwrap_or("");
+
+        // Truncate description respecting UTF-8 character boundaries
+        let desc_truncated = if desc.chars().count() > 50 {
+            let truncated: String = desc.chars().take(47).collect();
+            format!("{}...", truncated)
+        } else {
+            desc.to_string()
+        };
+
+        // Add lock emoji for private repositories
+        //let privacy_indicator = if self.private { "🔒" } else { "  " };
+        let privacy_indicator = if self.private { "*" } else { " " };
+
+        let msg = format!(
+            "{:<7} {:2}{:40} {:52}",
+            self.stargazers_count, privacy_indicator, self.full_name, desc_truncated
+        );
+
+        write!(f, "{}", msg)
+    }
+}
+
 type Result<T> = std::result::Result<T, String>;
 
 /// CLI arguments
@@ -149,9 +213,9 @@ type Result<T> = std::result::Result<T, String>;
     about = "A tool to retrieve and download github release package."
 )]
 struct Cli {
-    /// GitHub Repository in the format "owner/repo"
+    /// GitHub Repository in the format "owner/repo" (required for release operations)
     #[arg(long, short = 'r')]
-    repo: String,
+    repo: Option<String>,
 
     /// Token for GitHub API authentication
     #[arg(short = 't', long = "token")]
@@ -169,6 +233,13 @@ struct Cli {
     /// commas.
     #[arg(short = 'f', long = "filter")]
     filter: Option<String>,
+
+    /// Search for repositories using pattern:
+    /// - "username/keyword": Search repos owned by username containing keyword
+    /// - "username/": List all repos owned by username
+    /// - "/keyword": Search top N repos globally containing keyword
+    #[arg(short = 's', long = "search")]
+    search: Option<String>,
 
     /// Directory to save downloaded assets (defaults to current directory)
     #[arg(short = 'o', long = "output-dir")]
@@ -193,6 +264,14 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Validate that either --repo or --search is provided
+    if cli.repo.is_none() && cli.search.is_none() {
+        return Err(
+            "Either --repo or --search must be provided. Use --help for more information."
+                .to_string(),
+        );
+    }
 
     let verbose = cli.verbose;
     let log_level = match verbose {
@@ -228,8 +307,37 @@ async fn main() -> Result<()> {
         .build()
         .map_err(|e| e.to_string())?;
 
+    // SEARCH MODE - handle repository search
+    if let Some(search_pattern) = cli.search.as_deref() {
+        jinfo!("Searching repositories with pattern: {}", search_pattern);
+
+        let pattern = parse_search_pattern(search_pattern)?;
+        let repositories = search_repositories(&client, &pattern, cli.num).await?;
+
+        if repositories.is_empty() {
+            jinfo!("No repositories found matching the search criteria");
+            return Ok(());
+        }
+
+        // Display results in table format
+        eprintln!("{:4} {:<7} {:2}{:40}", "No", "Stars", " ", "Repository",);
+        eprintln!("{:-<108}", "");
+
+        for (i, repo) in repositories.iter().enumerate() {
+            eprintln!("{:<4} {}", i + 1, repo.summary());
+        }
+
+        eprintln!("\nFound {} repositories", repositories.len());
+
+        return Ok(());
+    }
+
     if let Some(download) = cli.download.as_deref() {
-        let releases = get_release_info(&client, &cli.repo, None).await?;
+        let repo = cli
+            .repo
+            .as_deref()
+            .ok_or_else(|| "--repo is required for download mode".to_string())?;
+        let releases = get_release_info(&client, repo, None).await?;
 
         // Support "latest" as a special keyword to download the most recent release
         let release = if download == "latest" {
@@ -406,9 +514,13 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     if let Some(info) = cli.info.as_deref() {
+        let repo = cli
+            .repo
+            .as_deref()
+            .ok_or_else(|| "--repo is required for info mode".to_string())?;
         let versions = info.split(',').collect::<Vec<&str>>();
 
-        let releases = get_release_info(&client, &cli.repo, None).await?;
+        let releases = get_release_info(&client, repo, None).await?;
 
         for ver in versions {
             let release = releases
@@ -419,7 +531,11 @@ async fn main() -> Result<()> {
             eprintln!("---------------------");
         }
     } else {
-        let releases = get_release_info(&client, &cli.repo, Some(cli.num)).await?;
+        let repo = cli
+            .repo
+            .as_deref()
+            .ok_or_else(|| "--repo is required for listing releases".to_string())?;
+        let releases = get_release_info(&client, repo, Some(cli.num)).await?;
         eprintln!(
             "{:4} {:15} {:15} {:5} {:20} {:4}",
             "No", "Name", "Tag", "Type", "Published/Created", "Assets"
@@ -459,6 +575,119 @@ async fn get_release_info(client: &Client, repo: &str, num: Option<usize>) -> Re
         .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
 
     Ok(releases)
+}
+
+async fn search_repositories(
+    client: &Client,
+    pattern: &SearchPattern,
+    num: usize,
+) -> Result<Vec<Repository>> {
+    match pattern {
+        SearchPattern::UserAllRepos { username } => {
+            // Use Search API to properly include private repos when authenticated
+            let query = format!("user:{}", username);
+            let url = format!(
+                "https://api.github.com/search/repositories?q={}&per_page={}&page=1&sort=updated&order=desc",
+                urlencoding::encode(&query),
+                num
+            );
+
+            jdebug!("Searching user repos: {}", url);
+
+            let response = client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| format!("Failed to search repositories: {}", e))?;
+
+            let status = response.status();
+            if !status.is_success() {
+                return Err(format!(
+                    "GitHub API request failed with status: {} (User '{}' may not exist)",
+                    status, username
+                ));
+            }
+
+            let search_response: SearchResponse = response
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
+
+            jinfo!(
+                "Found {} repositories for user '{}'",
+                search_response.total_count,
+                username
+            );
+            Ok(search_response.items)
+        }
+
+        SearchPattern::UserWithKeyword { username, keyword } => {
+            // Use Search API with user qualifier
+            let query = format!("user:{} {}", username, keyword);
+            let url = format!(
+                "https://api.github.com/search/repositories?q={}&per_page={}&page=1&sort=stars&order=desc",
+                urlencoding::encode(&query),
+                num
+            );
+
+            jdebug!("Searching repositories: {}", url);
+
+            let response = client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| format!("Failed to search repositories: {}", e))?;
+
+            let status = response.status();
+            if !status.is_success() {
+                return Err(format!("GitHub API request failed with status: {}", status));
+            }
+
+            let search_response: SearchResponse = response
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
+
+            jinfo!(
+                "Found {} repositories matching query",
+                search_response.total_count
+            );
+            Ok(search_response.items)
+        }
+
+        SearchPattern::GlobalKeyword { keyword } => {
+            // Use Search API for global search
+            let url = format!(
+                "https://api.github.com/search/repositories?q={}&per_page={}&page=1&sort=stars&order=desc",
+                urlencoding::encode(keyword),
+                num
+            );
+
+            jdebug!("Searching global repositories: {}", url);
+
+            let response = client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| format!("Failed to search repositories: {}", e))?;
+
+            let status = response.status();
+            if !status.is_success() {
+                return Err(format!("GitHub API request failed with status: {}", status));
+            }
+
+            let search_response: SearchResponse = response
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse JSON response: {}", e))?;
+
+            jinfo!(
+                "Found {} repositories matching keyword",
+                search_response.total_count
+            );
+            Ok(search_response.items)
+        }
+    }
 }
 
 fn add_auth_header(cli: &Cli, header: &mut HeaderMap) -> Result<()> {
@@ -519,5 +748,50 @@ fn add_auth_header(cli: &Cli, header: &mut HeaderMap) -> Result<()> {
         Ok(())
     } else {
         Err("No authentication method provided".to_string())
+    }
+}
+
+enum SearchPattern {
+    UserWithKeyword { username: String, keyword: String },
+    UserAllRepos { username: String },
+    GlobalKeyword { keyword: String },
+}
+
+fn parse_search_pattern(pattern: &str) -> Result<SearchPattern> {
+    let pattern = pattern.trim();
+
+    if pattern.is_empty() {
+        return Err("Search pattern cannot be empty".to_string());
+    }
+
+    if let Some(slash_pos) = pattern.find('/') {
+        let username = &pattern[..slash_pos];
+        let keyword = &pattern[slash_pos + 1..];
+
+        if username.is_empty() {
+            // Pattern: "/keyword"
+            if keyword.is_empty() {
+                return Err("Keyword cannot be empty for global search".to_string());
+            }
+            Ok(SearchPattern::GlobalKeyword {
+                keyword: keyword.to_string(),
+            })
+        } else if keyword.is_empty() {
+            // Pattern: "username/"
+            Ok(SearchPattern::UserAllRepos {
+                username: username.to_string(),
+            })
+        } else {
+            // Pattern: "username/keyword"
+            Ok(SearchPattern::UserWithKeyword {
+                username: username.to_string(),
+                keyword: keyword.to_string(),
+            })
+        }
+    } else {
+        // No slash - treat as global keyword search
+        Ok(SearchPattern::GlobalKeyword {
+            keyword: pattern.to_string(),
+        })
     }
 }

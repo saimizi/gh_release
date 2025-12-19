@@ -106,6 +106,31 @@ ghr -r owner/repo -i v1.2.3
 ghr -r owner/repo -i "v1.2.3,v1.2.2,v1.2.1"
 ```
 
+### Search Repositories
+
+Search for GitHub repositories using flexible patterns:
+
+```bash
+# List all repositories owned by a user
+ghr -s "torvalds/"
+
+# Search user's repositories containing keyword
+ghr -s "rust-lang/compiler"
+
+# Search top N repositories globally
+ghr -s "/kubernetes" -n 10
+```
+
+#### Search Pattern Formats
+
+| Pattern | Description | Example |
+|---------|-------------|---------|
+| `username/` | List all repos owned by user/org | `ghr -s "microsoft/"` |
+| `username/keyword` | Search user's repos with keyword | `ghr -s "google/tensorflow"` |
+| `/keyword` | Search top repos globally | `ghr -s "/docker"` |
+
+**Note**: Use `-n` flag to control number of results (default: 10)
+
 ### Private Repository Access
 
 ```bash
