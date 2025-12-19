@@ -37,6 +37,40 @@ struct Release {
     assets: Vec<Asset>,
 }
 
+impl Release {
+    // Additional methods can be added here if needed
+    pub fn summary(&self) -> String {
+        let types = if self.draft.unwrap_or(false) {
+            "Draft"
+        } else if self.prerelease.unwrap_or(false) {
+            "Pre"
+        } else {
+            "Rel"
+        };
+
+        let published_at = self
+            .published_at
+            .as_deref()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .and_then(|dt| {
+                dt.with_timezone(&Local)
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string()
+                    .into()
+            })
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        format!(
+            "{:15} {:15} {:5} {:20} {:4}",
+            self.name.as_deref().unwrap_or("Unnamed"),
+            self.tag_name.as_deref().unwrap_or("No tag"),
+            types,
+            published_at,
+            self.assets.len()
+        )
+    }
+}
+
 impl Display for Release {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let draft = self
@@ -120,7 +154,7 @@ struct Cli {
     info: Option<String>,
 
     /// Number of packages to fetch
-    #[arg(short = 'n', long = "num", default_value_t = 1)]
+    #[arg(short = 'n', long = "num", default_value_t = 10)]
     num: usize,
 
     /// Maximum number of concurrent downloads
@@ -361,9 +395,12 @@ async fn main() -> Result<()> {
         }
     } else {
         let releases = get_release_info(&client, &cli.repo, Some(cli.num)).await?;
+        eprintln!(
+            "{:4} {:15} {:15} {:5} {:20} {:4}",
+            "No", "Name", "Tag", "Type", "Published", "Assets"
+        );
         for (i, r) in releases.iter().enumerate() {
-            eprintln!("{}. {}", i + 1, r);
-            eprintln!("---------------------");
+            eprintln!("{:<4} {}", i + 1, r.summary());
         }
     }
 
