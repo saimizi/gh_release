@@ -1,0 +1,172 @@
+name: Release
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'Cargo.toml'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-version:
+    name: Check Version Change
+    runs-on: ubuntu-latest
+    outputs:
+      version_changed: ${{ steps.check.outputs.changed }}
+      new_version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check if version changed
+        id: check
+        run: |
+          # Get current version from Cargo.toml
+          CURRENT_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "Current version: $CURRENT_VERSION"
+
+          # Get previous version from the previous commit
+          git checkout HEAD~1 -- Cargo.toml 2>/dev/null || true
+          PREVIOUS_VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/' || echo "")
+          git checkout HEAD -- Cargo.toml
+          echo "Previous version: $PREVIOUS_VERSION"
+
+          # Check if version changed
+          if [ "$CURRENT_VERSION" != "$PREVIOUS_VERSION" ] && [ -n "$CURRENT_VERSION" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+            echo "Version changed from $PREVIOUS_VERSION to $CURRENT_VERSION"
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "Version unchanged"
+          fi
+
+  build:
+    name: Build Release Packages
+    needs: check-version
+    if: needs.check-version.outputs.version_changed == 'true'
+    runs-on: ${{ matrix.target.runner }}
+    strategy:
+      matrix:
+        target:
+          - arch: x86_64
+            rust_target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - arch: arm64
+            rust_target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          target: ${{ matrix.target.rust_target }}
+          override: true
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb
+
+      - name: Install OpenSSL
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+
+      - name: Build binary
+        run: |
+          cargo build --release --target ${{ matrix.target.rust_target }}
+
+      - name: Create Debian package
+        run: |
+          cargo deb --target ${{ matrix.target.rust_target }} --no-build
+
+      - name: Rename package
+        run: |
+          VERSION="${{ needs.check-version.outputs.new_version }}"
+          PKG_NAME="ghr_${VERSION}_${{ matrix.target.arch }}.deb"
+          mv target/${{ matrix.target.rust_target }}/debian/*.deb "$PKG_NAME"
+          echo "PKG_PATH=$PKG_NAME" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.target.arch }}
+          path: ${{ env.PKG_PATH }}
+
+  create-release:
+    name: Create GitHub Release
+    needs: [check-version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          VERSION="${{ needs.check-version.outputs.new_version }}"
+
+          # Get the previous tag
+          PREVIOUS_TAG=$(git tag --sort=-version:refname | grep -E '^v[0-9]' | head -1 || echo "")
+
+          if [ -n "$PREVIOUS_TAG" ]; then
+            echo "Generating changelog from $PREVIOUS_TAG to HEAD"
+            CHANGELOG=$(git log ${PREVIOUS_TAG}..HEAD --pretty=format:"- %s (%h)" --no-merges)
+          else
+            echo "No previous tag found, generating changelog from beginning"
+            CHANGELOG=$(git log --pretty=format:"- %s (%h)" --no-merges)
+          fi
+
+          # Create changelog file
+          cat > CHANGELOG.txt << EOF
+          Release v${VERSION}
+
+          ## Changes
+
+          ${CHANGELOG}
+          EOF
+
+          echo "Changelog created"
+          cat CHANGELOG.txt
+
+      - name: Create Git Tag
+        run: |
+          VERSION="${{ needs.check-version.outputs.new_version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${VERSION}" -m "Release v${VERSION}"
+          git push origin "v${VERSION}"
+
+      - name: Create source tarball
+        run: |
+          VERSION="${{ needs.check-version.outputs.new_version }}"
+          git archive --format=tar.gz --prefix=ghr-${VERSION}/ HEAD > ghr-${VERSION}.tar.gz
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ needs.check-version.outputs.new_version }}
+          name: v${{ needs.check-version.outputs.new_version }}
+          body_path: CHANGELOG.txt
+          draft: false
+          prerelease: false
+          files: |
+            ghr-${{ needs.check-version.outputs.new_version }}.tar.gz
+            artifacts/deb-x86_64/*.deb
+            artifacts/deb-arm64/*.deb
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

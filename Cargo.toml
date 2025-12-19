@@ -26,3 +26,19 @@ futures = "0.3"
 indicatif = "0.17"
 urlencoding = "2.1"
 
+[package.metadata.deb]
+maintainer = "Seimizu Joukan <saimizi@protonmail.com>"
+copyright = "2025, Seimizu Joukan <saimizi@protonmail.com>"
+license-file = ["LICENSE", "4"]
+extended-description = """\
+A fast, simple command-line tool for fetching and downloading GitHub release assets.
+Features include pattern matching for assets, concurrent downloads, interactive selection,
+and repository search with private repository support."""
+depends = "$auto"
+section = "utility"
+priority = "optional"
+assets = [
+    ["target/release/ghr", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/ghr/", "644"],
+]
+
