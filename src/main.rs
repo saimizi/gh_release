@@ -35,6 +35,7 @@ struct Release {
     published_at: Option<String>,
     draft: Option<bool>,
     prerelease: Option<bool>,
+    body: Option<String>,
     assets: Vec<Asset>,
 }
 
@@ -125,7 +126,15 @@ impl Display for Release {
                 .unwrap_or("-".to_string())
         )?;
 
-        writeln!(f, "Assets:")?;
+        // Display release notes if available
+        if let Some(body) = &self.body {
+            if !body.is_empty() {
+                writeln!(f, "\nRelease Notes:")?;
+                writeln!(f, "{}", body)?;
+            }
+        }
+
+        writeln!(f, "\nAssets:")?;
         for asset in &self.assets {
             writeln!(
                 f,
