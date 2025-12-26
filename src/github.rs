@@ -1,6 +1,41 @@
-use crate::models::{Release, Repository, RepositoryInfo, Result, SearchResponse};
-use jlogger_tracing::jinfo;
+use crate::cache::Cache;
+use crate::constants;
+use crate::errors::{GhrError, Result};
+use crate::models::{Release, Repository, RepositoryInfo, SearchResponse};
+use jlogger_tracing::{jdebug, jinfo};
 use reqwest::Client;
+use tokio::time::{sleep, Duration};
+
+/// Retry an async operation with exponential backoff
+/// Only retries on network-related errors, not on logical errors like 404
+async fn retry_with_backoff<F, T, Fut>(operation: F) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let max_retries = constants::retry::MAX_RETRIES;
+    let mut attempts = 0;
+
+    loop {
+        match operation().await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                // Only retry on network errors, not on logical errors
+                let should_retry = matches!(e, GhrError::Network(_));
+
+                if should_retry && attempts < max_retries {
+                    let delay =
+                        Duration::from_secs(constants::retry::BASE_DELAY_SECS * 2u64.pow(attempts));
+                    jdebug!("Retry attempt {} after {:?}: {}", attempts + 1, delay, e);
+                    sleep(delay).await;
+                    attempts += 1;
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+    }
+}
 
 /// Fetch release information from GitHub
 pub async fn get_release_info(
@@ -8,43 +43,85 @@ pub async fn get_release_info(
     repo: &str,
     tag: Option<&str>,
 ) -> Result<Vec<Release>> {
-    let url = if let Some(tag) = tag {
-        format!(
-            "https://api.github.com/repos/{}/releases/tags/{}",
-            repo, tag
-        )
+    get_release_info_with_base(client, constants::GITHUB_API_BASE, repo, tag).await
+}
+
+/// Fetch release information from GitHub with custom base URL
+pub async fn get_release_info_with_base(
+    client: &Client,
+    base_url: &str,
+    repo: &str,
+    tag: Option<&str>,
+) -> Result<Vec<Release>> {
+    get_release_info_with_cache(client, base_url, repo, tag, None).await
+}
+
+/// Fetch release information from GitHub with optional caching
+pub async fn get_release_info_with_cache(
+    client: &Client,
+    base_url: &str,
+    repo: &str,
+    tag: Option<&str>,
+    cache: Option<&Cache>,
+) -> Result<Vec<Release>> {
+    // Parse owner/repo from repo string
+    let parts: Vec<&str> = repo.split('/').collect();
+    if parts.len() != 2 {
+        return Err(GhrError::Generic(format!(
+            "Invalid repository format: {}",
+            repo
+        )));
+    }
+    let (owner, repo_name) = (parts[0], parts[1]);
+
+    // Create cache key
+    let cache_key = if let Some(tag) = tag {
+        format!("releases:{}:{}:{}", repo, tag, base_url)
     } else {
-        format!("https://api.github.com/repos/{}/releases", repo)
+        format!("releases:{}:{}", repo, base_url)
     };
 
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to send request: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "GitHub API request failed with status: {}",
-            response.status()
-        ));
+    // Try cache first
+    if let Some(cache) = cache {
+        if let Some(cached) = cache.get::<Vec<Release>>(&cache_key).await {
+            return Ok(cached);
+        }
     }
 
-    if tag.is_some() {
-        // Single release
-        let release: Release = response
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse response: {}", e))?;
-        Ok(vec![release])
+    let url = if let Some(tag) = tag {
+        constants::endpoints::release_by_tag_with_base(base_url, owner, repo_name, tag)
     } else {
-        // Multiple releases
-        let releases: Vec<Release> = response
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse response: {}", e))?;
-        Ok(releases)
+        constants::endpoints::releases_with_base(base_url, owner, repo_name)
+    };
+
+    let result = retry_with_backoff(|| async {
+        let response = client.get(&url).send().await?;
+
+        if !response.status().is_success() {
+            return Err(GhrError::GitHubApi(format!(
+                "Failed to fetch releases: HTTP {}",
+                response.status()
+            )));
+        }
+
+        if tag.is_some() {
+            // Single release
+            let release: Release = response.json().await?;
+            Ok(vec![release])
+        } else {
+            // Multiple releases
+            let releases: Vec<Release> = response.json().await?;
+            Ok(releases)
+        }
+    })
+    .await?;
+
+    // Cache the result
+    if let Some(cache) = cache {
+        let _ = cache.set(&cache_key, &result).await;
     }
+
+    Ok(result)
 }
 
 /// Search pattern types
@@ -60,7 +137,9 @@ pub fn parse_search_pattern(pattern: &str) -> Result<SearchPattern> {
     let pattern = pattern.trim();
 
     if pattern.is_empty() {
-        return Err("Search pattern cannot be empty".to_string());
+        return Err(GhrError::InvalidSearchPattern(
+            "Search pattern cannot be empty".to_string(),
+        ));
     }
 
     if let Some(slash_pos) = pattern.find('/') {
@@ -70,7 +149,9 @@ pub fn parse_search_pattern(pattern: &str) -> Result<SearchPattern> {
         if username.is_empty() {
             // Pattern: "/keyword"
             if keyword.is_empty() {
-                return Err("Keyword cannot be empty for global search".to_string());
+                return Err(GhrError::InvalidSearchPattern(
+                    "Keyword cannot be empty for global search".to_string(),
+                ));
             }
             Ok(SearchPattern::GlobalKeyword {
                 keyword: keyword.to_string(),
@@ -101,6 +182,27 @@ pub async fn search_repositories(
     pattern: &SearchPattern,
     num: usize,
 ) -> Result<Vec<Repository>> {
+    search_repositories_with_base(client, constants::GITHUB_API_BASE, pattern, num).await
+}
+
+/// Search for repositories with custom base URL
+pub async fn search_repositories_with_base(
+    client: &Client,
+    base_url: &str,
+    pattern: &SearchPattern,
+    num: usize,
+) -> Result<Vec<Repository>> {
+    search_repositories_with_cache(client, base_url, pattern, num, None).await
+}
+
+/// Search for repositories with optional caching
+pub async fn search_repositories_with_cache(
+    client: &Client,
+    base_url: &str,
+    pattern: &SearchPattern,
+    num: usize,
+    cache: Option<&Cache>,
+) -> Result<Vec<Repository>> {
     let query = match pattern {
         SearchPattern::UserWithKeyword { username, keyword } => {
             format!("user:{} {} in:name,description", username, keyword)
@@ -113,31 +215,40 @@ pub async fn search_repositories(
         }
     };
 
-    let url = format!(
-        "https://api.github.com/search/repositories?q={}&sort=stars&order=desc&per_page={}",
-        urlencoding::encode(&query),
-        num
-    );
+    // Create cache key
+    let cache_key = format!("search:{}:{}:{}", query, num, base_url);
 
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to send request: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "GitHub API request failed with status: {}",
-            response.status()
-        ));
+    // Try cache first
+    if let Some(cache) = cache {
+        if let Some(cached) = cache.get::<Vec<Repository>>(&cache_key).await {
+            return Ok(cached);
+        }
     }
 
-    let search_response: SearchResponse = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse response: {}", e))?;
+    let url = constants::endpoints::search_repositories_with_base(base_url, &query, num);
 
-    Ok(search_response.items)
+    let result = retry_with_backoff(|| async {
+        let response = client.get(&url).send().await?;
+
+        if !response.status().is_success() {
+            return Err(GhrError::GitHubApi(format!(
+                "Failed to search repositories: HTTP {}",
+                response.status()
+            )));
+        }
+
+        let search_response: SearchResponse = response.json().await?;
+
+        Ok(search_response.items)
+    })
+    .await?;
+
+    // Cache the result
+    if let Some(cache) = cache {
+        let _ = cache.set(&cache_key, &result).await;
+    }
+
+    Ok(result)
 }
 
 /// Validate that a repository exists and is accessible
@@ -146,33 +257,39 @@ pub async fn validate_repository(
     owner: &str,
     repo: &str,
 ) -> Result<RepositoryInfo> {
-    let url = format!("https://api.github.com/repos/{}/{}", owner, repo);
+    validate_repository_with_base(client, constants::GITHUB_API_BASE, owner, repo).await
+}
+
+/// Validate that a repository exists and is accessible with custom base URL
+pub async fn validate_repository_with_base(
+    client: &Client,
+    base_url: &str,
+    owner: &str,
+    repo: &str,
+) -> Result<RepositoryInfo> {
+    let url = constants::endpoints::repository_with_base(base_url, owner, repo);
 
     jinfo!("Validating repository {}/{}...", owner, repo);
 
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to connect to GitHub API: {}", e))?;
+    retry_with_backoff(|| async {
+        let response = client.get(&url).send().await?;
 
-    if response.status().is_success() {
-        let repo_info: RepositoryInfo = response
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse repository response: {}", e))?;
-        Ok(repo_info)
-    } else if response.status() == reqwest::StatusCode::NOT_FOUND {
-        Err(format!(
-            "Repository '{}/{}' not found (or you don't have access)",
-            owner, repo
-        ))
-    } else {
-        Err(format!(
-            "GitHub API request failed with status: {}",
-            response.status()
-        ))
-    }
+        if response.status().is_success() {
+            let repo_info: RepositoryInfo = response.json().await?;
+            Ok(repo_info)
+        } else if response.status() == reqwest::StatusCode::NOT_FOUND {
+            Err(GhrError::RepositoryNotFound {
+                owner: owner.to_string(),
+                repo: repo.to_string(),
+            })
+        } else {
+            Err(GhrError::GitHubApi(format!(
+                "Failed to validate repository: HTTP {}",
+                response.status()
+            )))
+        }
+    })
+    .await
 }
 
 /// Validate that a ref (branch/tag/commit) exists in a repository
@@ -182,63 +299,69 @@ pub async fn validate_ref(
     repo: &str,
     ref_name: &str,
 ) -> Result<String> {
+    validate_ref_with_base(client, constants::GITHUB_API_BASE, owner, repo, ref_name).await
+}
+
+/// Validate that a ref (branch/tag/commit) exists in a repository with custom base URL
+pub async fn validate_ref_with_base(
+    client: &Client,
+    base_url: &str,
+    owner: &str,
+    repo: &str,
+    ref_name: &str,
+) -> Result<String> {
     jinfo!("Validating ref '{}'...", ref_name);
 
     // Try as branch first
-    let branch_url = format!(
-        "https://api.github.com/repos/{}/{}/branches/{}",
-        owner, repo, ref_name
-    );
+    let branch_url = constants::endpoints::branch_with_base(base_url, owner, repo, ref_name);
 
-    let response = client.get(&branch_url).send().await.map_err(|e| {
-        format!(
-            "Failed to connect to GitHub API while checking branch: {}",
-            e
-        )
-    })?;
+    let response = retry_with_backoff(|| async {
+        client
+            .get(&branch_url)
+            .send()
+            .await
+            .map_err(GhrError::Network)
+    })
+    .await?;
 
     if response.status().is_success() {
         return Ok("branch".to_string());
     }
 
     // Try as tag
-    let tag_url = format!(
-        "https://api.github.com/repos/{}/{}/git/refs/tags/{}",
-        owner, repo, ref_name
-    );
+    let tag_url = constants::endpoints::tag_with_base(base_url, owner, repo, ref_name);
 
-    let response = client
-        .get(&tag_url)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to connect to GitHub API while checking tag: {}", e))?;
+    let response = retry_with_backoff(|| async {
+        client.get(&tag_url).send().await.map_err(GhrError::Network)
+    })
+    .await?;
 
     if response.status().is_success() {
         return Ok("tag".to_string());
     }
 
     // Try as commit SHA
-    let commit_url = format!(
-        "https://api.github.com/repos/{}/{}/commits/{}",
-        owner, repo, ref_name
-    );
+    let commit_url = constants::endpoints::commit_with_base(base_url, owner, repo, ref_name);
 
-    let response = client.get(&commit_url).send().await.map_err(|e| {
-        format!(
-            "Failed to connect to GitHub API while checking commit: {}",
-            e
-        )
-    })?;
+    let response = retry_with_backoff(|| async {
+        client
+            .get(&commit_url)
+            .send()
+            .await
+            .map_err(GhrError::Network)
+    })
+    .await?;
 
     if response.status().is_success() {
         return Ok("commit".to_string());
     }
 
     // Ref not found
-    Err(format!(
-        "Branch/tag/commit '{}' not found in repository '{}/{}'",
-        ref_name, owner, repo
-    ))
+    Err(GhrError::RefNotFound {
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+        ref_name: ref_name.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -299,7 +422,8 @@ mod tests {
     fn test_parse_search_pattern_empty_string() {
         let result = parse_search_pattern("");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("empty"));
+        // Check that it's an InvalidSearchPattern error
+        matches!(result.unwrap_err(), GhrError::InvalidSearchPattern(_));
     }
 
     #[test]
@@ -312,7 +436,8 @@ mod tests {
     fn test_parse_search_pattern_empty_global_keyword() {
         let result = parse_search_pattern("/");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Keyword cannot be empty"));
+        // Check that it's an InvalidSearchPattern error
+        matches!(result.unwrap_err(), GhrError::InvalidSearchPattern(_));
     }
 
     #[test]

@@ -1,8 +1,8 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 
 /// GitHub release asset
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Asset {
     pub name: String,
     pub browser_download_url: String,
@@ -22,7 +22,7 @@ impl Display for Asset {
 }
 
 /// GitHub release
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Release {
     pub tag_name: String,
     pub name: Option<String>,
@@ -53,7 +53,7 @@ pub struct SearchResponse {
 
 /// GitHub repository
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Repository {
     pub name: String,
     pub full_name: String,
@@ -65,7 +65,7 @@ pub struct Repository {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Owner {
     pub login: String,
 }
@@ -125,8 +125,7 @@ pub struct RepositoryInfo {
     pub private: bool,
 }
 
-/// Custom result type
-pub type Result<T> = std::result::Result<T, String>;
+// Result type is now defined in errors.rs
 
 #[cfg(test)]
 mod tests {

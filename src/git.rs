@@ -1,5 +1,6 @@
 use crate::cli::Cli;
-use crate::models::{CloneSpec, Result};
+use crate::errors::{GhrError, Result};
+use crate::models::CloneSpec;
 use jlogger_tracing::{jdebug, jinfo, jwarn};
 
 /// Parse clone URL and extract owner, repo, and optional ref
@@ -7,7 +8,9 @@ pub fn parse_clone_url(url: &str) -> Result<CloneSpec> {
     let url = url.trim();
 
     if url.is_empty() {
-        return Err("Clone URL cannot be empty".to_string());
+        return Err(GhrError::InvalidUrl {
+            url: "".to_string(),
+        });
     }
 
     // Split by ':' to separate URL and optional ref
@@ -37,7 +40,9 @@ pub fn parse_clone_url(url: &str) -> Result<CloneSpec> {
 
         let parts: Vec<&str> = path.split('/').collect();
         if parts.len() < 2 {
-            return Err(format!("Invalid GitHub URL: {}", url_part));
+            return Err(GhrError::InvalidUrl {
+                url: url_part.to_string(),
+            });
         }
         (parts[0].to_string(), parts[1].to_string())
     } else if url_part.starts_with("git@github.com:") {
@@ -48,28 +53,33 @@ pub fn parse_clone_url(url: &str) -> Result<CloneSpec> {
 
         let parts: Vec<&str> = path.split('/').collect();
         if parts.len() < 2 {
-            return Err(format!("Invalid GitHub SSH URL: {}", url_part));
+            return Err(GhrError::InvalidUrl {
+                url: url_part.to_string(),
+            });
         }
         (parts[0].to_string(), parts[1].to_string())
     } else if url_part.contains('/') {
         // Short format: owner/repo
         let parts: Vec<&str> = url_part.split('/').collect();
         if parts.len() < 2 {
-            return Err(format!("Invalid repository format: {}", url_part));
+            return Err(GhrError::InvalidUrl {
+                url: url_part.to_string(),
+            });
         }
         (
             parts[0].to_string(),
             parts[1].trim_end_matches(".git").to_string(),
         )
     } else {
-        return Err(format!(
-            "Unsupported URL format: {}. Use 'owner/repo', 'https://github.com/owner/repo', or 'git@github.com:owner/repo.git'",
-            url_part
-        ));
+        return Err(GhrError::InvalidUrl {
+            url: url_part.to_string(),
+        });
     };
 
     if owner.is_empty() || repo.is_empty() {
-        return Err("Owner and repository name cannot be empty".to_string());
+        return Err(GhrError::InvalidUrl {
+            url: url_part.to_string(),
+        });
     }
 
     Ok(CloneSpec {
@@ -101,8 +111,11 @@ pub fn get_repo_name(url: &str) -> String {
 }
 
 /// Check if git is installed and available in PATH
-pub fn check_git_installed() -> Result<()> {
-    let output = std::process::Command::new("git").arg("--version").output();
+pub async fn check_git_installed() -> Result<()> {
+    let output = tokio::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .await;
 
     match output {
         Ok(output) if output.status.success() => {
@@ -112,11 +125,8 @@ pub fn check_git_installed() -> Result<()> {
             );
             Ok(())
         }
-        Ok(_) => Err("Git command failed. Please ensure git is properly installed.".to_string()),
-        Err(_) => Err(
-            "Git is not installed or not in PATH. Please install git to use the clone feature."
-                .to_string(),
-        ),
+        Ok(_) => Err(GhrError::GitNotInstalled),
+        Err(_) => Err(GhrError::GitNotInstalled),
     }
 }
 
@@ -130,28 +140,36 @@ pub fn construct_clone_url(owner: &str, repo: &str, token: Option<&str>) -> Stri
 }
 
 /// Execute git clone command
-pub fn execute_git_clone(clone_url: &str, target_dir: &str, ref_name: Option<&str>) -> Result<()> {
+pub async fn execute_git_clone(
+    clone_url: &str,
+    target_dir: &str,
+    ref_name: Option<&str>,
+) -> Result<()> {
     // Check target directory doesn't exist
     if std::path::Path::new(target_dir).exists() {
-        return Err(format!(
+        return Err(GhrError::Generic(format!(
             "Directory '{}' already exists. Please remove it or choose a different name.",
             target_dir
-        ));
+        )));
     }
 
     // Execute git clone
     jinfo!("Executing: git clone <url> {}", target_dir);
-    let output = std::process::Command::new("git")
+    let output = tokio::process::Command::new("git")
         .arg("clone")
         .arg(clone_url)
         .arg(target_dir)
         .output()
-        .map_err(|e| format!("Failed to execute git clone: {}", e))?;
+        .await
+        .map_err(|e| GhrError::GitCommand(format!("Failed to execute git clone: {}", e)))?;
 
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
         cleanup_partial_clone(target_dir);
-        return Err(format!("Git clone failed: {}", error.trim()));
+        return Err(GhrError::GitCommand(format!(
+            "Git clone failed: {}",
+            error.trim()
+        )));
     }
 
     // Show git output
@@ -165,18 +183,22 @@ pub fn execute_git_clone(clone_url: &str, target_dir: &str, ref_name: Option<&st
     // Checkout specific ref if provided
     if let Some(ref_name) = ref_name {
         jinfo!("Checking out ref '{}'...", ref_name);
-        let output = std::process::Command::new("git")
+        let output = tokio::process::Command::new("git")
             .arg("-C")
             .arg(target_dir)
             .arg("checkout")
             .arg(ref_name)
             .output()
-            .map_err(|e| format!("Failed to execute git checkout: {}", e))?;
+            .await
+            .map_err(|e| GhrError::GitCommand(format!("Failed to execute git checkout: {}", e)))?;
 
         if !output.status.success() {
             let error = String::from_utf8_lossy(&output.stderr);
             cleanup_partial_clone(target_dir);
-            return Err(format!("Git checkout failed: {}", error.trim()));
+            return Err(GhrError::GitCommand(format!(
+                "Git checkout failed: {}",
+                error.trim()
+            )));
         }
 
         if !output.stderr.is_empty() {
@@ -268,7 +290,8 @@ mod tests {
     fn test_parse_clone_url_invalid_empty() {
         let result = parse_clone_url("");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("empty"));
+        // Check that it's an InvalidUrl error
+        matches!(result.unwrap_err(), GhrError::InvalidUrl { .. });
     }
 
     #[test]
