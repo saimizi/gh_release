@@ -46,11 +46,13 @@ ghr [OPTIONS] --repo <REPO>
 |--------|-------|------|-------------|
 | Token | `-t` | `--token <TOKEN>` | GitHub API token for authentication |
 | Token File | `-T` | `--token-file <PATH>` | Path to file containing GitHub token |
+| Clone | `-c` | `--clone <URL[:REF]>` | Clone repository with optional branch/tag/commit |
 | Download | `-d` | `--download <VERSION>` | Download specific version (or "latest") |
 | Filter | `-f` | `--filter <FILTERS>` | Filter assets by comma-separated patterns |
 | Output Dir | `-o` | `--output-dir <PATH>` | Save downloads to specified directory |
 | Info | `-i` | `--info <VERSIONS>` | Show info about specific versions (comma-separated) |
 | Number | `-n` | `--num <NUM>` | Number of releases to list (default: 1) |
+| Concurrency | `-j` | `--concurrency <NUM>` | Maximum number of concurrent downloads (default: 5) |
 | Verbose | `-v` | `--verbose` | Increase verbosity (-v, -vv for more detail) |
 
 ## Examples
@@ -95,6 +97,45 @@ ghr -r owner/repo -d v1.0.0 -f ".deb"
 # Multiple filters (downloads assets containing any of these)
 ghr -r owner/repo -d latest -f "linux,darwin,windows"
 ```
+
+### Clone Repository
+
+Clone a GitHub repository with optional branch, tag, or commit checkout:
+
+```bash
+# Clone repository to default directory (repository name)
+ghr -c owner/repo
+
+# Clone to specific directory
+ghr -c owner/repo my-directory
+
+# Clone specific branch
+ghr -c owner/repo:main my-directory
+
+# Clone specific tag
+ghr -c owner/repo:v1.0.0 my-directory
+
+# Clone specific commit
+ghr -c owner/repo:abc1234 my-directory
+
+# Clone with HTTPS URL
+ghr -c https://github.com/owner/repo
+
+# Clone private repository (requires authentication)
+ghr -t YOUR_TOKEN -c owner/private-repo my-directory
+```
+
+**Supported URL formats:**
+- `owner/repo` (short format)
+- `https://github.com/owner/repo`
+- `https://github.com/owner/repo.git`
+- `git@github.com:owner/repo.git`
+
+**Optional ref specification:**
+Append `:ref` to specify branch, tag, or commit SHA to checkout after cloning (e.g., `owner/repo:main`).
+
+**Prerequisites:**
+- Git must be installed and available in PATH
 
 ### View Release Information
 
