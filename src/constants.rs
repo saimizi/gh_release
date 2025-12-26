@@ -104,6 +104,20 @@ pub mod endpoints {
             num
         )
     }
+
+    /// Get tags for a repository
+    #[allow(dead_code)]
+    pub fn tags(owner: &str, repo: &str, per_page: usize) -> String {
+        tags_with_base(GITHUB_API_BASE, owner, repo, per_page)
+    }
+
+    /// Get tags for a repository with custom base URL
+    pub fn tags_with_base(base_url: &str, owner: &str, repo: &str, per_page: usize) -> String {
+        format!(
+            "{}/repos/{}/{}/tags?per_page={}",
+            base_url, owner, repo, per_page
+        )
+    }
 }
 
 /// HTTP headers
