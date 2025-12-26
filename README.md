@@ -255,12 +255,47 @@ Get machine-readable output for scripting and automation:
 # List releases in JSON format
 ghr -r owner/repo --format json
 
-# Search repositories in JSON format
+# Search repositories in JSON format (includes latest tags)
 ghr -s "rust-lang/" --format json -n 5
+
+# The -n flag controls both:
+# - Number of repositories to return
+# - Number of latest tags to fetch for each repository
+ghr -s "microsoft/" --format json -n 10
 
 # Parse with jq
 ghr -r owner/repo --format json | jq '.[0].tag_name'
 ghr -r owner/repo --format json | jq -r '.[] | .assets[].name'
+
+# Extract repository names and their latest tags
+ghr -s "rust-lang/" --format json | jq -r '.[] | "\(.full_name): \(.latest_tags | join(", "))"'
+```
+
+**JSON Output for Search Mode:**
+When using `--format json` with search (`-s`), each repository includes:
+- All standard repository fields (name, description, stars, etc.)
+- `latest_tags`: Array of the latest N tag names (where N is specified by `-n`)
+
+Example output:
+```json
+[
+  {
+    "name": "rust",
+    "full_name": "rust-lang/rust",
+    "description": "Empowering everyone to build reliable and efficient software.",
+    "stargazers_count": 95000,
+    "html_url": "https://github.com/rust-lang/rust",
+    "owner": {
+      "login": "rust-lang"
+    },
+    "private": false,
+    "latest_tags": [
+      "1.75.0",
+      "1.74.1",
+      "1.74.0"
+    ]
+  }
+]
 ```
 
 ### Response Caching

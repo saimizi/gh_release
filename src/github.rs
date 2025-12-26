@@ -1,7 +1,7 @@
 use crate::cache::Cache;
 use crate::constants;
 use crate::errors::{GhrError, Result};
-use crate::models::{Release, Repository, RepositoryInfo, SearchResponse};
+use crate::models::{Release, Repository, RepositoryInfo, SearchResponse, Tag};
 use jlogger_tracing::{jdebug, jinfo};
 use reqwest::Client;
 use tokio::time::{sleep, Duration};
@@ -368,6 +368,37 @@ pub async fn validate_ref_with_base(
         repo: repo.to_string(),
         ref_name: ref_name.to_string(),
     })
+}
+
+/// Fetch tags for a repository
+pub async fn get_repository_tags(
+    client: &Client,
+    base_url: &str,
+    owner: &str,
+    repo: &str,
+    per_page: usize,
+) -> Result<Vec<String>> {
+    let url = constants::endpoints::tags_with_base(base_url, owner, repo, per_page);
+
+    retry_with_backoff(|| async {
+        let response = client.get(&url).send().await?;
+
+        if !response.status().is_success() {
+            // If tags endpoint fails, return empty list instead of error
+            // This allows the search to continue even if some repos don't have tags
+            jdebug!(
+                "Failed to fetch tags for {}/{}: HTTP {}",
+                owner,
+                repo,
+                response.status()
+            );
+            return Ok(Vec::new());
+        }
+
+        let tags: Vec<Tag> = response.json().await?;
+        Ok(tags.into_iter().map(|t| t.name).collect())
+    })
+    .await
 }
 
 #[cfg(test)]

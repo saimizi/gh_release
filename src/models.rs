@@ -53,7 +53,7 @@ pub struct SearchResponse {
 
 /// GitHub repository
 #[allow(dead_code)]
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Repository {
     pub name: String,
     pub full_name: String,
@@ -64,8 +64,16 @@ pub struct Repository {
     pub private: bool,
 }
 
+/// Repository with additional tag information for enhanced JSON output
+#[derive(Debug, Serialize)]
+pub struct RepositoryWithTags {
+    #[serde(flatten)]
+    pub repository: Repository,
+    pub latest_tags: Vec<String>,
+}
+
 #[allow(dead_code)]
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Owner {
     pub login: String,
 }
@@ -123,6 +131,12 @@ pub struct RepositoryInfo {
     pub full_name: String,
     pub default_branch: String,
     pub private: bool,
+}
+
+/// GitHub tag
+#[derive(Debug, Deserialize)]
+pub struct Tag {
+    pub name: String,
 }
 
 // Result type is now defined in errors.rs

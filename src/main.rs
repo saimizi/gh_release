@@ -158,7 +158,31 @@ async fn main() -> Result<()> {
         // Display results based on format
         match cli.format {
             cli::OutputFormat::Json => {
-                let json = serde_json::to_string_pretty(&repositories)?;
+                // Fetch tags for each repository to enrich JSON output
+                jinfo!("Fetching tags for {} repositories...", repositories.len());
+
+                let mut repos_with_tags = Vec::new();
+                for repo in &repositories {
+                    let parts: Vec<&str> = repo.full_name.split('/').collect();
+                    if parts.len() == 2 {
+                        let tags = github::get_repository_tags(
+                            &client,
+                            &cli.api_url,
+                            parts[0],
+                            parts[1],
+                            cli.num,
+                        )
+                        .await
+                        .unwrap_or_default(); // If tags fetch fails, use empty list
+
+                        repos_with_tags.push(models::RepositoryWithTags {
+                            repository: repo.clone(),
+                            latest_tags: tags,
+                        });
+                    }
+                }
+
+                let json = serde_json::to_string_pretty(&repos_with_tags)?;
                 println!("{}", json);
             }
             cli::OutputFormat::Table => {
