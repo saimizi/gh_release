@@ -49,11 +49,16 @@ ghr [OPTIONS] --repo <REPO>
 | Clone | `-c` | `--clone <URL[:REF]>` | Clone repository with optional branch/tag/commit |
 | Download | `-d` | `--download <VERSION>` | Download specific version (or "latest") |
 | Filter | `-f` | `--filter <FILTERS>` | Filter assets by comma-separated patterns |
-| Output Dir | `-o` | `--output-dir <PATH>` | Save downloads to specified directory |
 | Info | `-i` | `--info <VERSIONS>` | Show info about specific versions (comma-separated) |
 | Number | `-n` | `--num <NUM>` | Number of releases to list (default: 1) |
 | Concurrency | `-j` | `--concurrency <NUM>` | Maximum number of concurrent downloads (default: 5) |
 | Verbose | `-v` | `--verbose` | Increase verbosity (-v, -vv for more detail) |
+
+### Positional Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `[DIRECTORY]` | Directory for downloads or clone destination |
 
 ## Examples
 
@@ -72,17 +77,21 @@ ghr -r owner/repo -n 5
 ### Download Latest Release
 
 ```bash
-# Download all assets from latest release
+# Download all assets from latest release to current directory
 ghr -r owner/repo -d latest
 
 # Download to specific directory
-ghr -r owner/repo -d latest -o ./downloads
+ghr -r owner/repo -d latest ./downloads
 ```
 
 ### Download Specific Version
 
 ```bash
+# Download to current directory
 ghr -r owner/repo -d v1.2.3
+
+# Download to specific directory
+ghr -r owner/repo -d v1.2.3 ./releases
 ```
 
 ### Download with Filtering
@@ -197,7 +206,7 @@ ghr -r owner/private-repo -d latest
 ```yaml
 - name: Download release asset
   run: |
-    ghr -r owner/repo -d latest -f "linux,amd64" -o ./bin
+    ghr -r owner/repo -d latest -f "linux,amd64" ./bin
 ```
 
 #### GitLab CI
@@ -205,13 +214,13 @@ ghr -r owner/private-repo -d latest
 ```yaml
 download_release:
   script:
-    - ghr -r owner/repo -d v1.0.0 -t $GITHUB_TOKEN -o ./artifacts
+    - ghr -r owner/repo -d v1.0.0 -t $GITHUB_TOKEN ./artifacts
 ```
 
 #### Jenkins
 
 ```groovy
-sh 'ghr -r owner/repo -d latest -T /var/jenkins/.github_token'
+sh 'ghr -r owner/repo -d latest -T /var/jenkins/.github_token ./bin'
 ```
 
 ## Authentication
@@ -290,7 +299,7 @@ ghr -r owner/repo -d latest -vv
 
 ```bash
 #!/bin/bash
-ghr -r mycompany/app -d latest -f "linux,amd64" -o /tmp
+ghr -r mycompany/app -d latest -f "linux,amd64" /tmp
 sudo dpkg -i /tmp/app_*_amd64.deb
 ```
 
@@ -299,7 +308,7 @@ sudo dpkg -i /tmp/app_*_amd64.deb
 ```bash
 #!/bin/bash
 for platform in linux darwin windows; do
-  ghr -r owner/repo -d v1.0.0 -f "$platform" -o "./dist/$platform"
+  ghr -r owner/repo -d v1.0.0 -f "$platform" "./dist/$platform"
 done
 ```
 
@@ -312,7 +321,7 @@ latest=$(ghr -r owner/repo -n 1 2>&1 | grep "Tag:" | awk '{print $2}')
 
 if [ "$latest" != "$current_version" ]; then
   echo "New version available: $latest"
-  ghr -r owner/repo -d latest -o ./updates
+  ghr -r owner/repo -d latest ./updates
 fi
 ```
 
