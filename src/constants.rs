@@ -18,6 +18,7 @@ pub mod endpoints {
     use super::GITHUB_API_BASE;
 
     /// Get releases for a repository
+    #[allow(dead_code)]
     pub fn releases(owner: &str, repo: &str) -> String {
         releases_with_base(GITHUB_API_BASE, owner, repo)
     }
@@ -28,6 +29,7 @@ pub mod endpoints {
     }
 
     /// Get a specific release by tag
+    #[allow(dead_code)]
     pub fn release_by_tag(owner: &str, repo: &str, tag: &str) -> String {
         release_by_tag_with_base(GITHUB_API_BASE, owner, repo, tag)
     }
@@ -41,6 +43,7 @@ pub mod endpoints {
     }
 
     /// Get repository information
+    #[allow(dead_code)]
     pub fn repository(owner: &str, repo: &str) -> String {
         repository_with_base(GITHUB_API_BASE, owner, repo)
     }
@@ -51,6 +54,7 @@ pub mod endpoints {
     }
 
     /// Get branch information
+    #[allow(dead_code)]
     pub fn branch(owner: &str, repo: &str, branch: &str) -> String {
         branch_with_base(GITHUB_API_BASE, owner, repo, branch)
     }
@@ -61,6 +65,7 @@ pub mod endpoints {
     }
 
     /// Get tag information
+    #[allow(dead_code)]
     pub fn tag(owner: &str, repo: &str, tag: &str) -> String {
         tag_with_base(GITHUB_API_BASE, owner, repo, tag)
     }
@@ -74,6 +79,7 @@ pub mod endpoints {
     }
 
     /// Get commit information
+    #[allow(dead_code)]
     pub fn commit(owner: &str, repo: &str, sha: &str) -> String {
         commit_with_base(GITHUB_API_BASE, owner, repo, sha)
     }
@@ -84,6 +90,7 @@ pub mod endpoints {
     }
 
     /// Search repositories
+    #[allow(dead_code)]
     pub fn search_repositories(query: &str, num: usize) -> String {
         search_repositories_with_base(GITHUB_API_BASE, query, num)
     }

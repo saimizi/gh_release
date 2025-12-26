@@ -38,6 +38,7 @@ where
 }
 
 /// Fetch release information from GitHub
+#[allow(dead_code)]
 pub async fn get_release_info(
     client: &Client,
     repo: &str,
@@ -47,6 +48,7 @@ pub async fn get_release_info(
 }
 
 /// Fetch release information from GitHub with custom base URL
+#[allow(dead_code)]
 pub async fn get_release_info_with_base(
     client: &Client,
     base_url: &str,
@@ -177,6 +179,7 @@ pub fn parse_search_pattern(pattern: &str) -> Result<SearchPattern> {
 }
 
 /// Search for repositories
+#[allow(dead_code)]
 pub async fn search_repositories(
     client: &Client,
     pattern: &SearchPattern,
@@ -186,6 +189,7 @@ pub async fn search_repositories(
 }
 
 /// Search for repositories with custom base URL
+#[allow(dead_code)]
 pub async fn search_repositories_with_base(
     client: &Client,
     base_url: &str,
@@ -252,6 +256,7 @@ pub async fn search_repositories_with_cache(
 }
 
 /// Validate that a repository exists and is accessible
+#[allow(dead_code)]
 pub async fn validate_repository(
     client: &Client,
     owner: &str,
@@ -293,6 +298,7 @@ pub async fn validate_repository_with_base(
 }
 
 /// Validate that a ref (branch/tag/commit) exists in a repository
+#[allow(dead_code)]
 pub async fn validate_ref(
     client: &Client,
     owner: &str,
