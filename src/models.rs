@@ -125,8 +125,7 @@ pub struct RepositoryInfo {
     pub private: bool,
 }
 
-/// Custom result type
-pub type Result<T> = std::result::Result<T, String>;
+// Result type is now defined in errors.rs
 
 #[cfg(test)]
 mod tests {

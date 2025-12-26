@@ -1,15 +1,16 @@
 mod auth;
 mod cli;
+mod errors;
 mod git;
 mod github;
 mod models;
 
 use chrono::prelude::*;
 use cli::Cli;
+use errors::{GhrError, Result};
 use futures::stream::{self, StreamExt};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use jlogger_tracing::{jdebug, jerror, jinfo, JloggerBuilder, LevelFilter, LogTimeFormat};
-use models::Result;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
 use reqwest::Client;
 use std::fs;
@@ -24,10 +25,10 @@ async fn main() -> Result<()> {
 
     // Validate that either --repo, --search, or --clone is provided
     if cli.repo.is_none() && cli.search.is_none() && cli.clone.is_none() {
-        return Err(
+        return Err(GhrError::MissingArgument(
             "Either --repo, --search, or --clone must be provided. Use --help for more information."
                 .to_string(),
-        );
+        ));
     }
 
     let verbose = cli.verbose;
@@ -59,10 +60,7 @@ async fn main() -> Result<()> {
         jinfo!("No authentication method provided, proceeding unauthenticated");
     }
 
-    let client = Client::builder()
-        .default_headers(header)
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = Client::builder().default_headers(header).build()?;
 
     // CLONE MODE - handle repository cloning
     if let Some(clone_arg) = cli.clone.as_deref() {
@@ -137,30 +135,28 @@ async fn main() -> Result<()> {
     }
 
     if let Some(download) = cli.download.as_deref() {
-        let repo = cli
-            .repo
-            .as_deref()
-            .ok_or_else(|| "--repo is required for download mode".to_string())?;
+        let repo = cli.repo.as_deref().ok_or_else(|| {
+            GhrError::MissingArgument("--repo is required for download mode".to_string())
+        })?;
         let releases = github::get_release_info(&client, repo, None).await?;
 
         // Support "latest" as a special keyword to download the most recent release
         let release = if download == "latest" {
             jinfo!("Downloading latest release");
-            releases
-                .first()
-                .ok_or_else(|| "No releases found in repository".to_string())?
+            releases.first().ok_or_else(|| GhrError::NoReleases)?
         } else {
             jinfo!("Downloading release: {}", download);
             releases
                 .iter()
                 .find(|r| r.tag_name == download)
-                .ok_or_else(|| format!("Release with tag '{}' not found", download))?
+                .ok_or_else(|| GhrError::ReleaseNotFound {
+                    tag: download.to_string(),
+                })?
         };
 
         // Create output directory if specified
         if let Some(directory) = &cli.directory {
-            fs::create_dir_all(directory)
-                .map_err(|e| format!("Failed to create output directory '{}': {}", directory, e))?;
+            fs::create_dir_all(directory)?;
             jinfo!("Saving assets to: {}", directory);
         }
 
@@ -241,12 +237,12 @@ async fn main() -> Result<()> {
                         .header(ACCEPT, "application/octet-stream")
                         .send()
                         .await
-                        .map_err(|e| format!("Failed to download '{}': {}", name, e))?;
+                        .map_err(GhrError::Network)?;
 
                     let status = response.status();
                     if !status.is_success() {
                         pb.finish_with_message(format!("Failed: {} (HTTP {})", name, status));
-                        return Err(format!("HTTP {} for '{}'", status, name));
+                        return Err(GhrError::GitHubApi(format!("HTTP {} for '{}'", status, name)));
                     }
 
                     // Read bytes with progress
@@ -256,7 +252,7 @@ async fn main() -> Result<()> {
 
                     while let Some(chunk_result) = stream.next().await {
                         let chunk =
-                            chunk_result.map_err(|e| format!("Download error for '{}': {}", name, e))?;
+                            chunk_result.map_err(GhrError::Network)?;
                         downloaded += chunk.len() as u64;
                         bytes_vec.extend_from_slice(&chunk);
                         pb.set_position(downloaded);
@@ -265,9 +261,8 @@ async fn main() -> Result<()> {
                     pb.finish_with_message(format!("Complete: {}", name));
 
                     // Write to file
-                    fs::write(&output_path, &bytes_vec).map_err(|e| {
-                        format!("Failed to write file '{}': {}", output_path.display(), e)
-                    })?;
+                    fs::write(&output_path, &bytes_vec)
+                        .map_err(GhrError::Io)?;
 
                     Ok(name)
                 }
@@ -297,17 +292,19 @@ async fn main() -> Result<()> {
             for error in &errors {
                 jerror!("  - {}", error);
             }
-            return Err(format!("Download failed with {} error(s)", errors.len()));
+            return Err(GhrError::Generic(format!(
+                "Download failed with {} error(s)",
+                errors.len()
+            )));
         }
 
         return Ok(());
     }
 
     // INFO MODE or default list mode
-    let repo = cli
-        .repo
-        .as_deref()
-        .ok_or_else(|| "--repo is required for info/list mode".to_string())?;
+    let repo = cli.repo.as_deref().ok_or_else(|| {
+        GhrError::MissingArgument("--repo is required for info/list mode".to_string())
+    })?;
 
     if let Some(info_tags) = cli.info.as_deref() {
         // INFO MODE - show detailed information about specific versions

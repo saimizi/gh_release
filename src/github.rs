@@ -1,4 +1,5 @@
-use crate::models::{Release, Repository, RepositoryInfo, Result, SearchResponse};
+use crate::errors::{GhrError, Result};
+use crate::models::{Release, Repository, RepositoryInfo, SearchResponse};
 use jlogger_tracing::jinfo;
 use reqwest::Client;
 
@@ -17,32 +18,22 @@ pub async fn get_release_info(
         format!("https://api.github.com/repos/{}/releases", repo)
     };
 
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to send request: {}", e))?;
+    let response = client.get(&url).send().await?;
 
     if !response.status().is_success() {
-        return Err(format!(
-            "GitHub API request failed with status: {}",
+        return Err(GhrError::GitHubApi(format!(
+            "Failed to fetch releases: HTTP {}",
             response.status()
-        ));
+        )));
     }
 
     if tag.is_some() {
         // Single release
-        let release: Release = response
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse response: {}", e))?;
+        let release: Release = response.json().await?;
         Ok(vec![release])
     } else {
         // Multiple releases
-        let releases: Vec<Release> = response
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse response: {}", e))?;
+        let releases: Vec<Release> = response.json().await?;
         Ok(releases)
     }
 }
@@ -60,7 +51,9 @@ pub fn parse_search_pattern(pattern: &str) -> Result<SearchPattern> {
     let pattern = pattern.trim();
 
     if pattern.is_empty() {
-        return Err("Search pattern cannot be empty".to_string());
+        return Err(GhrError::InvalidSearchPattern(
+            "Search pattern cannot be empty".to_string(),
+        ));
     }
 
     if let Some(slash_pos) = pattern.find('/') {
@@ -70,7 +63,9 @@ pub fn parse_search_pattern(pattern: &str) -> Result<SearchPattern> {
         if username.is_empty() {
             // Pattern: "/keyword"
             if keyword.is_empty() {
-                return Err("Keyword cannot be empty for global search".to_string());
+                return Err(GhrError::InvalidSearchPattern(
+                    "Keyword cannot be empty for global search".to_string(),
+                ));
             }
             Ok(SearchPattern::GlobalKeyword {
                 keyword: keyword.to_string(),
@@ -119,23 +114,16 @@ pub async fn search_repositories(
         num
     );
 
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to send request: {}", e))?;
+    let response = client.get(&url).send().await?;
 
     if !response.status().is_success() {
-        return Err(format!(
-            "GitHub API request failed with status: {}",
+        return Err(GhrError::GitHubApi(format!(
+            "Failed to search repositories: HTTP {}",
             response.status()
-        ));
+        )));
     }
 
-    let search_response: SearchResponse = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse response: {}", e))?;
+    let search_response: SearchResponse = response.json().await?;
 
     Ok(search_response.items)
 }
@@ -150,28 +138,21 @@ pub async fn validate_repository(
 
     jinfo!("Validating repository {}/{}...", owner, repo);
 
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to connect to GitHub API: {}", e))?;
+    let response = client.get(&url).send().await?;
 
     if response.status().is_success() {
-        let repo_info: RepositoryInfo = response
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse repository response: {}", e))?;
+        let repo_info: RepositoryInfo = response.json().await?;
         Ok(repo_info)
     } else if response.status() == reqwest::StatusCode::NOT_FOUND {
-        Err(format!(
-            "Repository '{}/{}' not found (or you don't have access)",
-            owner, repo
-        ))
+        Err(GhrError::RepositoryNotFound {
+            owner: owner.to_string(),
+            repo: repo.to_string(),
+        })
     } else {
-        Err(format!(
-            "GitHub API request failed with status: {}",
+        Err(GhrError::GitHubApi(format!(
+            "Failed to validate repository: HTTP {}",
             response.status()
-        ))
+        )))
     }
 }
 
@@ -190,12 +171,7 @@ pub async fn validate_ref(
         owner, repo, ref_name
     );
 
-    let response = client.get(&branch_url).send().await.map_err(|e| {
-        format!(
-            "Failed to connect to GitHub API while checking branch: {}",
-            e
-        )
-    })?;
+    let response = client.get(&branch_url).send().await?;
 
     if response.status().is_success() {
         return Ok("branch".to_string());
@@ -207,11 +183,7 @@ pub async fn validate_ref(
         owner, repo, ref_name
     );
 
-    let response = client
-        .get(&tag_url)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to connect to GitHub API while checking tag: {}", e))?;
+    let response = client.get(&tag_url).send().await?;
 
     if response.status().is_success() {
         return Ok("tag".to_string());
@@ -223,22 +195,18 @@ pub async fn validate_ref(
         owner, repo, ref_name
     );
 
-    let response = client.get(&commit_url).send().await.map_err(|e| {
-        format!(
-            "Failed to connect to GitHub API while checking commit: {}",
-            e
-        )
-    })?;
+    let response = client.get(&commit_url).send().await?;
 
     if response.status().is_success() {
         return Ok("commit".to_string());
     }
 
     // Ref not found
-    Err(format!(
-        "Branch/tag/commit '{}' not found in repository '{}/{}'",
-        ref_name, owner, repo
-    ))
+    Err(GhrError::RefNotFound {
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+        ref_name: ref_name.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -299,7 +267,8 @@ mod tests {
     fn test_parse_search_pattern_empty_string() {
         let result = parse_search_pattern("");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("empty"));
+        // Check that it's an InvalidSearchPattern error
+        matches!(result.unwrap_err(), GhrError::InvalidSearchPattern(_));
     }
 
     #[test]
@@ -312,7 +281,8 @@ mod tests {
     fn test_parse_search_pattern_empty_global_keyword() {
         let result = parse_search_pattern("/");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Keyword cannot be empty"));
+        // Check that it's an InvalidSearchPattern error
+        matches!(result.unwrap_err(), GhrError::InvalidSearchPattern(_));
     }
 
     #[test]
