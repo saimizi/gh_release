@@ -63,6 +63,18 @@ pub enum GhrError {
     #[error("Invalid header value: {0}")]
     InvalidHeaderValue(#[from] reqwest::header::InvalidHeaderValue),
 
+    /// Regex parsing error
+    #[error("Invalid regex pattern: {0}")]
+    RegexError(#[from] regex::Error),
+
+    /// Glob pattern parsing error
+    #[error("Invalid glob pattern: {0}")]
+    GlobError(#[from] globset::Error),
+
+    /// JSON parsing/serialization error
+    #[error("JSON error: {0}")]
+    JsonError(#[from] serde_json::Error),
+
     /// Generic error for simple string messages
     #[error("{0}")]
     Generic(String),

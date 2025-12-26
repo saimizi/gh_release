@@ -1,4 +1,14 @@
-use clap::{ArgAction, Parser};
+use clap::{ArgAction, Parser, ValueEnum};
+
+/// Output format for list and search commands
+#[derive(ValueEnum, Clone, Debug, Default)]
+pub enum OutputFormat {
+    /// Table format (default)
+    #[default]
+    Table,
+    /// JSON format
+    Json,
+}
 
 /// CLI arguments
 #[derive(Parser)]
@@ -61,6 +71,22 @@ pub struct Cli {
     /// - For download: defaults to current directory
     #[arg(value_name = "DIRECTORY")]
     pub directory: Option<String>,
+
+    /// Preview what will be downloaded or cloned without executing
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
+
+    /// Output format for list and search commands
+    #[arg(long = "format", value_enum, default_value_t = OutputFormat::Table)]
+    pub format: OutputFormat,
+
+    /// GitHub API base URL (for GitHub Enterprise)
+    #[arg(long = "api-url", default_value = crate::constants::GITHUB_API_BASE)]
+    pub api_url: String,
+
+    /// Enable response caching (24 hour TTL)
+    #[arg(long = "cache")]
+    pub cache: bool,
 
     #[arg(short = 'v', long = "verbose", action = ArgAction::Count)]
     pub verbose: u8,

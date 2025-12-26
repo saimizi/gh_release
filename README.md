@@ -7,11 +7,15 @@ A fast, simple command-line tool for fetching and downloading GitHub release ass
 - 🚀 **Fast and lightweight** - Single binary written in Rust
 - 🔐 **Multiple authentication methods** - Token, token file, or `.netrc` support
 - 🔒 **Private repository support** - Works seamlessly with private repos using proper authentication
-- 🎯 **Asset filtering** - Download only the assets you need with comma-separated filters
+- 🎯 **Advanced asset filtering** - Glob patterns, regex, and exclusion filters
 - 📦 **Latest release shorthand** - Use `-d latest` to always get the newest release
 - 📁 **Custom output directory** - Save downloads to any directory
 - 📊 **Release information** - View detailed info about releases before downloading
 - 🔄 **Cross-platform** - Works on Linux, macOS, and Windows
+- 🏢 **GitHub Enterprise support** - Custom API base URLs for enterprise instances
+- 💾 **Response caching** - Optional caching to reduce API calls
+- 🎭 **Dry-run mode** - Preview operations without executing them
+- 📋 **JSON output** - Machine-readable output for scripting
 
 ## Installation
 
@@ -48,10 +52,15 @@ ghr [OPTIONS] --repo <REPO>
 | Token File | `-T` | `--token-file <PATH>` | Path to file containing GitHub token |
 | Clone | `-c` | `--clone <URL[:REF]>` | Clone repository with optional branch/tag/commit |
 | Download | `-d` | `--download <VERSION>` | Download specific version (or "latest") |
-| Filter | `-f` | `--filter <FILTERS>` | Filter assets by comma-separated patterns |
+| Filter | `-f` | `--filter <FILTERS>` | Filter assets by patterns (glob/regex/exclude) |
 | Info | `-i` | `--info <VERSIONS>` | Show info about specific versions (comma-separated) |
-| Number | `-n` | `--num <NUM>` | Number of releases to list (default: 1) |
+| Search | `-s` | `--search <PATTERN>` | Search for repositories |
+| Number | `-n` | `--num <NUM>` | Number of releases to list (default: 10) |
 | Concurrency | `-j` | `--concurrency <NUM>` | Maximum number of concurrent downloads (default: 5) |
+| Dry-run | | `--dry-run` | Preview operations without executing them |
+| Format | | `--format <FORMAT>` | Output format: table (default) or json |
+| API URL | | `--api-url <URL>` | GitHub API base URL (for GitHub Enterprise) |
+| Cache | | `--cache` | Enable response caching (24 hour TTL) |
 | Verbose | `-v` | `--verbose` | Increase verbosity (-v, -vv for more detail) |
 
 ### Positional Arguments
@@ -96,15 +105,49 @@ ghr -r owner/repo -d v1.2.3 ./releases
 
 ### Download with Filtering
 
+The filter system supports multiple pattern types:
+
+#### Substring Matching (Simple)
 ```bash
-# Download only Linux amd64 packages
+# Download assets containing "linux" AND "amd64"
 ghr -r owner/repo -d latest -f "linux,amd64"
+```
 
+#### Glob Patterns (Wildcards)
+```bash
 # Download only .deb files
-ghr -r owner/repo -d v1.0.0 -f ".deb"
+ghr -r owner/repo -d latest -f "*.deb"
 
-# Multiple filters (downloads assets containing any of these)
-ghr -r owner/repo -d latest -f "linux,darwin,windows"
+# Download .tar.gz files
+ghr -r owner/repo -d latest -f "*.tar.gz"
+
+# Download files starting with "app-"
+ghr -r owner/repo -d latest -f "app-*"
+```
+
+#### Regex Patterns (Advanced)
+```bash
+# Download linux packages for amd64 architecture
+ghr -r owner/repo -d latest -f "linux-.*-amd64"
+
+# Download versioned releases
+ghr -r owner/repo -d latest -f "app-v[0-9]+\\..*"
+```
+
+#### Exclusion Patterns
+```bash
+# Download everything except Windows binaries
+ghr -r owner/repo -d latest -f "!windows"
+
+# Download .deb files but not test packages
+ghr -r owner/repo -d latest -f "*.deb,!test"
+```
+
+#### Combined Patterns
+```bash
+# Multiple filters work with AND logic
+ghr -r owner/repo -d latest -f "*.deb,!test,linux"
+# Downloads: .deb files, excluding test packages, containing "linux"
 ```
 
 ### Clone Repository
@@ -181,6 +224,80 @@ ghr -s "/kubernetes" -n 10
 
 **Note**: Use `-n` flag to control number of results (default: 10)
 
+### Dry-Run Mode
+
+Preview what will be downloaded or cloned without executing:
+
+```bash
+# Preview download without downloading
+ghr -r owner/repo -d latest --dry-run
+
+# Output shows:
+# - List of assets that would be downloaded
+# - Size of each asset
+# - Total download size
+# - Destination directory
+
+# Preview clone operation
+ghr -c owner/repo:main --dry-run
+
+# Output shows:
+# - Repository to be cloned
+# - Branch/tag/commit to checkout
+# - Target directory
+```
+
+### JSON Output
+
+Get machine-readable output for scripting and automation:
+
+```bash
+# List releases in JSON format
+ghr -r owner/repo --format json
+
+# Search repositories in JSON format
+ghr -s "rust-lang/" --format json -n 5
+
+# Parse with jq
+ghr -r owner/repo --format json | jq '.[0].tag_name'
+ghr -r owner/repo --format json | jq -r '.[] | .assets[].name'
+```
+
+### Response Caching
+
+Enable caching to reduce API calls and improve performance:
+
+```bash
+# Enable caching (24 hour TTL)
+ghr -r owner/repo --cache
+
+# Subsequent calls use cached data
+ghr -r owner/repo --cache  # Fast! Uses cache
+
+# Works with all API operations
+ghr -s "microsoft/" --cache -n 10
+ghr -r owner/repo -i v1.0.0 --cache
+```
+
+**Benefits:**
+- Reduces API rate limit usage
+- Faster response times for repeated queries
+- Cache stored in `~/.cache/ghr/` (or platform equivalent)
+- Automatic expiration after 24 hours
+
+### GitHub Enterprise Support
+
+Use with GitHub Enterprise instances:
+
+```bash
+# Specify custom API URL
+ghr --api-url https://github.enterprise.com/api -r owner/repo -d latest
+
+# Works with all operations
+ghr --api-url https://ghe.company.com/api -s "team/" -n 10
+ghr --api-url https://ghe.company.com/api -c owner/repo
+```
+
 ### Private Repository Access
 
 ```bash
@@ -206,7 +323,14 @@ ghr -r owner/private-repo -d latest
 ```yaml
 - name: Download release asset
   run: |
-    ghr -r owner/repo -d latest -f "linux,amd64" ./bin
+    # Use advanced filtering and caching
+    ghr -r owner/repo -d latest -f "*.deb,!test" --cache ./bin
+
+- name: Check for new releases
+  run: |
+    # Use JSON output for scripting
+    LATEST=$(ghr -r owner/repo --format json | jq -r '.[0].tag_name')
+    echo "Latest version: $LATEST"
 ```
 
 #### GitLab CI
@@ -214,13 +338,16 @@ ghr -r owner/private-repo -d latest
 ```yaml
 download_release:
   script:
-    - ghr -r owner/repo -d v1.0.0 -t $GITHUB_TOKEN ./artifacts
+    # Use dry-run first, then download
+    - ghr -r owner/repo -d v1.0.0 -t $GITHUB_TOKEN --dry-run
+    - ghr -r owner/repo -d v1.0.0 -t $GITHUB_TOKEN -f "linux-.*-amd64" ./artifacts
 ```
 
 #### Jenkins
 
 ```groovy
-sh 'ghr -r owner/repo -d latest -T /var/jenkins/.github_token ./bin'
+// Use GitHub Enterprise and caching
+sh 'ghr --api-url https://ghe.company.com/api -r owner/repo -d latest --cache -T /var/jenkins/.github_token ./bin'
 ```
 
 ## Authentication
@@ -299,7 +426,11 @@ ghr -r owner/repo -d latest -vv
 
 ```bash
 #!/bin/bash
-ghr -r mycompany/app -d latest -f "linux,amd64" /tmp
+# Preview first with dry-run
+ghr -r mycompany/app -d latest -f "*.deb,!test" --dry-run
+
+# Then download with advanced filtering
+ghr -r mycompany/app -d latest -f "*.deb,!test,linux" /tmp
 sudo dpkg -i /tmp/app_*_amd64.deb
 ```
 
@@ -317,11 +448,16 @@ done
 ```bash
 #!/bin/bash
 current_version="v1.2.3"
-latest=$(ghr -r owner/repo -n 1 2>&1 | grep "Tag:" | awk '{print $2}')
+
+# Use JSON output with caching for efficiency
+latest=$(ghr -r owner/repo --format json --cache | jq -r '.[0].tag_name')
 
 if [ "$latest" != "$current_version" ]; then
   echo "New version available: $latest"
-  ghr -r owner/repo -d latest ./updates
+  # Preview before downloading
+  ghr -r owner/repo -d latest --dry-run
+  # Then download
+  ghr -r owner/repo -d latest -f "linux-.*-amd64" ./updates
 fi
 ```
 
@@ -394,6 +530,9 @@ Built with:
 - [reqwest](https://github.com/seanmonstar/reqwest) - HTTP client
 - [tokio](https://github.com/tokio-rs/tokio) - Async runtime
 - [serde](https://github.com/serde-rs/serde) - Serialization framework
+- [regex](https://github.com/rust-lang/regex) - Regular expressions
+- [globset](https://github.com/BurntSushi/ripgrep/tree/master/crates/globset) - Glob pattern matching
+- [thiserror](https://github.com/dtolnay/thiserror) - Error handling
 
 ## Support
 

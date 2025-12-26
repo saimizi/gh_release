@@ -1,7 +1,9 @@
 mod auth;
+mod cache;
 mod cli;
 mod constants;
 mod errors;
+mod filters;
 mod git;
 mod github;
 mod models;
@@ -63,6 +65,9 @@ async fn main() -> Result<()> {
 
     let client = Client::builder().default_headers(header).build()?;
 
+    // Create cache instance
+    let cache = cache::Cache::new(cli.cache);
+
     // CLONE MODE - handle repository cloning
     if let Some(clone_arg) = cli.clone.as_deref() {
         jinfo!("Clone mode activated");
@@ -75,7 +80,9 @@ async fn main() -> Result<()> {
         jinfo!("Cloning repository: {}/{}", spec.owner, spec.repo);
 
         // Validate repository exists
-        let repo_info = github::validate_repository(&client, &spec.owner, &spec.repo).await?;
+        let repo_info =
+            github::validate_repository_with_base(&client, &cli.api_url, &spec.owner, &spec.repo)
+                .await?;
         jinfo!(
             "Repository found: {} ({})",
             repo_info.full_name,
@@ -88,7 +95,14 @@ async fn main() -> Result<()> {
 
         // Validate ref if specified
         if let Some(ref_name) = spec.ref_name.as_ref() {
-            let ref_type = github::validate_ref(&client, &spec.owner, &spec.repo, ref_name).await?;
+            let ref_type = github::validate_ref_with_base(
+                &client,
+                &cli.api_url,
+                &spec.owner,
+                &spec.repo,
+                ref_name,
+            )
+            .await?;
             jinfo!("Reference '{}' found (type: {})", ref_name, ref_type);
         }
 
@@ -101,6 +115,18 @@ async fn main() -> Result<()> {
 
         // Construct clone URL with auth if available
         let clone_url = git::construct_clone_url(&spec.owner, &spec.repo, token.as_deref());
+
+        // Handle dry-run mode
+        if cli.dry_run {
+            eprintln!("\nDry-run mode: Would clone repository");
+            eprintln!("  Repository: {}/{}", spec.owner, spec.repo);
+            if let Some(ref_name) = &spec.ref_name {
+                eprintln!("  Ref: {}", ref_name);
+            }
+            eprintln!("  Target directory: {}", target_dir);
+            eprintln!("\nNo action taken (dry-run mode)");
+            return Ok(());
+        }
 
         // Execute clone
         jinfo!("Cloning to '{}'...", target_dir);
@@ -115,22 +141,38 @@ async fn main() -> Result<()> {
         jinfo!("Searching repositories with pattern: {}", search_pattern);
 
         let pattern = github::parse_search_pattern(search_pattern)?;
-        let repositories = github::search_repositories(&client, &pattern, cli.num).await?;
+        let repositories = github::search_repositories_with_cache(
+            &client,
+            &cli.api_url,
+            &pattern,
+            cli.num,
+            Some(&cache),
+        )
+        .await?;
 
         if repositories.is_empty() {
             jinfo!("No repositories found matching the search criteria");
             return Ok(());
         }
 
-        // Display results in table format
-        eprintln!("{:4} {:<7} {:2}{:40}", "No", "Stars", " ", "Repository",);
-        eprintln!("{:-<108}", "");
+        // Display results based on format
+        match cli.format {
+            cli::OutputFormat::Json => {
+                let json = serde_json::to_string_pretty(&repositories)?;
+                println!("{}", json);
+            }
+            cli::OutputFormat::Table => {
+                // Display results in table format
+                eprintln!("{:4} {:<7} {:2}{:40}", "No", "Stars", " ", "Repository",);
+                eprintln!("{:-<108}", "");
 
-        for (i, repo) in repositories.iter().enumerate() {
-            eprintln!("{:<4} {}", i + 1, repo.summary());
+                for (i, repo) in repositories.iter().enumerate() {
+                    eprintln!("{:<4} {}", i + 1, repo.summary());
+                }
+
+                eprintln!("\nFound {} repositories", repositories.len());
+            }
         }
-
-        eprintln!("\nFound {} repositories", repositories.len());
 
         return Ok(());
     }
@@ -139,7 +181,9 @@ async fn main() -> Result<()> {
         let repo = cli.repo.as_deref().ok_or_else(|| {
             GhrError::MissingArgument("--repo is required for download mode".to_string())
         })?;
-        let releases = github::get_release_info(&client, repo, None).await?;
+        let releases =
+            github::get_release_info_with_cache(&client, &cli.api_url, repo, None, Some(&cache))
+                .await?;
 
         // Support "latest" as a special keyword to download the most recent release
         let release = if download == "latest" {
@@ -161,23 +205,24 @@ async fn main() -> Result<()> {
             jinfo!("Saving assets to: {}", directory);
         }
 
+        // Parse filter patterns
+        let filter_patterns: Vec<filters::FilterType> = if let Some(filter) = cli.filter.as_deref()
+        {
+            filter
+                .split(',')
+                .map(|f| filters::parse_filter(f.trim()))
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            Vec::new()
+        };
+
         // Collect assets to download with filtering
         let mut assets_to_download = Vec::new();
         for asset in &release.assets {
             let name = &asset.name;
-            let mut do_download = true;
-            if let Some(filter) = cli.filter.as_deref() {
-                do_download = false;
-                let filters = filter.split(',').collect::<Vec<&str>>();
-                for &f in filters.iter() {
-                    if name.contains(f) {
-                        do_download = true;
-                        break;
-                    }
-                }
-            }
 
-            if !do_download {
+            // Apply advanced filtering
+            if !filters::apply_filters(name, &filter_patterns) {
                 jinfo!("Skipping asset '{}' due to filter", name);
                 continue;
             }
@@ -200,6 +245,35 @@ async fn main() -> Result<()> {
 
         if assets_to_download.is_empty() {
             jinfo!("No assets to download");
+            return Ok(());
+        }
+
+        // Handle dry-run mode
+        if cli.dry_run {
+            eprintln!(
+                "\nDry-run mode: Would download {} asset(s)",
+                assets_to_download.len()
+            );
+            eprintln!("{:-<80}", "");
+
+            let mut total_size: u64 = 0;
+            for (name, _, _, size) in &assets_to_download {
+                let size_mb = *size as f64 / 1_048_576.0;
+                eprintln!("  - {} ({:.2} MB)", name, size_mb);
+                total_size += size;
+            }
+
+            let total_mb = total_size as f64 / 1_048_576.0;
+            eprintln!("{:-<80}", "");
+            eprintln!("Total size: {:.2} MB", total_mb);
+
+            if let Some(directory) = &cli.directory {
+                eprintln!("Destination: {}", directory);
+            } else {
+                eprintln!("Destination: current directory");
+            }
+
+            eprintln!("\nNo action taken (dry-run mode)");
             return Ok(());
         }
 
@@ -314,7 +388,14 @@ async fn main() -> Result<()> {
 
         for tag in tags {
             jinfo!("Fetching information for release: {}", tag);
-            let releases = github::get_release_info(&client, repo, Some(tag)).await?;
+            let releases = github::get_release_info_with_cache(
+                &client,
+                &cli.api_url,
+                repo,
+                Some(tag),
+                Some(&cache),
+            )
+            .await?;
 
             if let Some(release) = releases.first() {
                 println!("\n{}", "=".repeat(80));
@@ -329,39 +410,49 @@ async fn main() -> Result<()> {
         }
     } else {
         // LIST MODE - show list of recent releases
-        let releases = github::get_release_info(&client, repo, None).await?;
-        let releases_to_show = releases.iter().take(cli.num);
+        let releases =
+            github::get_release_info_with_cache(&client, &cli.api_url, repo, None, Some(&cache))
+                .await?;
+        let releases_to_show: Vec<_> = releases.iter().take(cli.num).collect();
 
-        eprintln!(
-            "{:4} {:20} {:30} {:15} {:10}",
-            "No", "Tag", "Name", "Published", "Assets"
-        );
-        eprintln!("{:-<108}", "");
+        match cli.format {
+            cli::OutputFormat::Json => {
+                let json = serde_json::to_string_pretty(&releases_to_show)?;
+                println!("{}", json);
+            }
+            cli::OutputFormat::Table => {
+                eprintln!(
+                    "{:4} {:20} {:30} {:15} {:10}",
+                    "No", "Tag", "Name", "Published", "Assets"
+                );
+                eprintln!("{:-<108}", "");
 
-        for (i, release) in releases_to_show.enumerate() {
-            let name = release.name.as_deref().unwrap_or("N/A");
+                for (i, release) in releases_to_show.iter().enumerate() {
+                    let name = release.name.as_deref().unwrap_or("N/A");
 
-            // Parse and format the published date
-            let published = DateTime::parse_from_rfc3339(&release.published_at)
-                .ok()
-                .map(|dt| dt.format("%Y-%m-%d").to_string())
-                .unwrap_or_else(|| "Unknown".to_string());
+                    // Parse and format the published date
+                    let published = DateTime::parse_from_rfc3339(&release.published_at)
+                        .ok()
+                        .map(|dt| dt.format("%Y-%m-%d").to_string())
+                        .unwrap_or_else(|| "Unknown".to_string());
 
-            eprintln!(
-                "{:<4} {:20} {:30} {:15} {:10}",
-                i + 1,
-                release.tag_name,
-                truncate(name, 30),
-                published,
-                release.assets.len()
-            );
+                    eprintln!(
+                        "{:<4} {:20} {:30} {:15} {:10}",
+                        i + 1,
+                        release.tag_name,
+                        truncate(name, 30),
+                        published,
+                        release.assets.len()
+                    );
+                }
+
+                eprintln!(
+                    "\nShowing {} of {} releases",
+                    cli.num.min(releases.len()),
+                    releases.len()
+                );
+            }
         }
-
-        eprintln!(
-            "\nShowing {} of {} releases",
-            cli.num.min(releases.len()),
-            releases.len()
-        );
     }
 
     Ok(())

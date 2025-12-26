@@ -1,3 +1,4 @@
+use crate::cache::Cache;
 use crate::constants;
 use crate::errors::{GhrError, Result};
 use crate::models::{Release, Repository, RepositoryInfo, SearchResponse};
@@ -42,6 +43,27 @@ pub async fn get_release_info(
     repo: &str,
     tag: Option<&str>,
 ) -> Result<Vec<Release>> {
+    get_release_info_with_base(client, constants::GITHUB_API_BASE, repo, tag).await
+}
+
+/// Fetch release information from GitHub with custom base URL
+pub async fn get_release_info_with_base(
+    client: &Client,
+    base_url: &str,
+    repo: &str,
+    tag: Option<&str>,
+) -> Result<Vec<Release>> {
+    get_release_info_with_cache(client, base_url, repo, tag, None).await
+}
+
+/// Fetch release information from GitHub with optional caching
+pub async fn get_release_info_with_cache(
+    client: &Client,
+    base_url: &str,
+    repo: &str,
+    tag: Option<&str>,
+    cache: Option<&Cache>,
+) -> Result<Vec<Release>> {
     // Parse owner/repo from repo string
     let parts: Vec<&str> = repo.split('/').collect();
     if parts.len() != 2 {
@@ -52,13 +74,27 @@ pub async fn get_release_info(
     }
     let (owner, repo_name) = (parts[0], parts[1]);
 
-    let url = if let Some(tag) = tag {
-        constants::endpoints::release_by_tag(owner, repo_name, tag)
+    // Create cache key
+    let cache_key = if let Some(tag) = tag {
+        format!("releases:{}:{}:{}", repo, tag, base_url)
     } else {
-        constants::endpoints::releases(owner, repo_name)
+        format!("releases:{}:{}", repo, base_url)
     };
 
-    retry_with_backoff(|| async {
+    // Try cache first
+    if let Some(cache) = cache {
+        if let Some(cached) = cache.get::<Vec<Release>>(&cache_key).await {
+            return Ok(cached);
+        }
+    }
+
+    let url = if let Some(tag) = tag {
+        constants::endpoints::release_by_tag_with_base(base_url, owner, repo_name, tag)
+    } else {
+        constants::endpoints::releases_with_base(base_url, owner, repo_name)
+    };
+
+    let result = retry_with_backoff(|| async {
         let response = client.get(&url).send().await?;
 
         if !response.status().is_success() {
@@ -78,7 +114,14 @@ pub async fn get_release_info(
             Ok(releases)
         }
     })
-    .await
+    .await?;
+
+    // Cache the result
+    if let Some(cache) = cache {
+        let _ = cache.set(&cache_key, &result).await;
+    }
+
+    Ok(result)
 }
 
 /// Search pattern types
@@ -139,6 +182,27 @@ pub async fn search_repositories(
     pattern: &SearchPattern,
     num: usize,
 ) -> Result<Vec<Repository>> {
+    search_repositories_with_base(client, constants::GITHUB_API_BASE, pattern, num).await
+}
+
+/// Search for repositories with custom base URL
+pub async fn search_repositories_with_base(
+    client: &Client,
+    base_url: &str,
+    pattern: &SearchPattern,
+    num: usize,
+) -> Result<Vec<Repository>> {
+    search_repositories_with_cache(client, base_url, pattern, num, None).await
+}
+
+/// Search for repositories with optional caching
+pub async fn search_repositories_with_cache(
+    client: &Client,
+    base_url: &str,
+    pattern: &SearchPattern,
+    num: usize,
+    cache: Option<&Cache>,
+) -> Result<Vec<Repository>> {
     let query = match pattern {
         SearchPattern::UserWithKeyword { username, keyword } => {
             format!("user:{} {} in:name,description", username, keyword)
@@ -151,9 +215,19 @@ pub async fn search_repositories(
         }
     };
 
-    let url = constants::endpoints::search_repositories(&query, num);
+    // Create cache key
+    let cache_key = format!("search:{}:{}:{}", query, num, base_url);
 
-    retry_with_backoff(|| async {
+    // Try cache first
+    if let Some(cache) = cache {
+        if let Some(cached) = cache.get::<Vec<Repository>>(&cache_key).await {
+            return Ok(cached);
+        }
+    }
+
+    let url = constants::endpoints::search_repositories_with_base(base_url, &query, num);
+
+    let result = retry_with_backoff(|| async {
         let response = client.get(&url).send().await?;
 
         if !response.status().is_success() {
@@ -167,7 +241,14 @@ pub async fn search_repositories(
 
         Ok(search_response.items)
     })
-    .await
+    .await?;
+
+    // Cache the result
+    if let Some(cache) = cache {
+        let _ = cache.set(&cache_key, &result).await;
+    }
+
+    Ok(result)
 }
 
 /// Validate that a repository exists and is accessible
@@ -176,7 +257,17 @@ pub async fn validate_repository(
     owner: &str,
     repo: &str,
 ) -> Result<RepositoryInfo> {
-    let url = constants::endpoints::repository(owner, repo);
+    validate_repository_with_base(client, constants::GITHUB_API_BASE, owner, repo).await
+}
+
+/// Validate that a repository exists and is accessible with custom base URL
+pub async fn validate_repository_with_base(
+    client: &Client,
+    base_url: &str,
+    owner: &str,
+    repo: &str,
+) -> Result<RepositoryInfo> {
+    let url = constants::endpoints::repository_with_base(base_url, owner, repo);
 
     jinfo!("Validating repository {}/{}...", owner, repo);
 
@@ -208,10 +299,21 @@ pub async fn validate_ref(
     repo: &str,
     ref_name: &str,
 ) -> Result<String> {
+    validate_ref_with_base(client, constants::GITHUB_API_BASE, owner, repo, ref_name).await
+}
+
+/// Validate that a ref (branch/tag/commit) exists in a repository with custom base URL
+pub async fn validate_ref_with_base(
+    client: &Client,
+    base_url: &str,
+    owner: &str,
+    repo: &str,
+    ref_name: &str,
+) -> Result<String> {
     jinfo!("Validating ref '{}'...", ref_name);
 
     // Try as branch first
-    let branch_url = constants::endpoints::branch(owner, repo, ref_name);
+    let branch_url = constants::endpoints::branch_with_base(base_url, owner, repo, ref_name);
 
     let response = retry_with_backoff(|| async {
         client
@@ -227,7 +329,7 @@ pub async fn validate_ref(
     }
 
     // Try as tag
-    let tag_url = constants::endpoints::tag(owner, repo, ref_name);
+    let tag_url = constants::endpoints::tag_with_base(base_url, owner, repo, ref_name);
 
     let response = retry_with_backoff(|| async {
         client.get(&tag_url).send().await.map_err(GhrError::Network)
@@ -239,7 +341,7 @@ pub async fn validate_ref(
     }
 
     // Try as commit SHA
-    let commit_url = constants::endpoints::commit(owner, repo, ref_name);
+    let commit_url = constants::endpoints::commit_with_base(base_url, owner, repo, ref_name);
 
     let response = retry_with_backoff(|| async {
         client

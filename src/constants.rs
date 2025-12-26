@@ -19,51 +19,80 @@ pub mod endpoints {
 
     /// Get releases for a repository
     pub fn releases(owner: &str, repo: &str) -> String {
-        format!("{}/repos/{}/{}/releases", GITHUB_API_BASE, owner, repo)
+        releases_with_base(GITHUB_API_BASE, owner, repo)
+    }
+
+    /// Get releases with custom base URL
+    pub fn releases_with_base(base_url: &str, owner: &str, repo: &str) -> String {
+        format!("{}/repos/{}/{}/releases", base_url, owner, repo)
     }
 
     /// Get a specific release by tag
     pub fn release_by_tag(owner: &str, repo: &str, tag: &str) -> String {
+        release_by_tag_with_base(GITHUB_API_BASE, owner, repo, tag)
+    }
+
+    /// Get a specific release by tag with custom base URL
+    pub fn release_by_tag_with_base(base_url: &str, owner: &str, repo: &str, tag: &str) -> String {
         format!(
             "{}/repos/{}/{}/releases/tags/{}",
-            GITHUB_API_BASE, owner, repo, tag
+            base_url, owner, repo, tag
         )
     }
 
     /// Get repository information
     pub fn repository(owner: &str, repo: &str) -> String {
-        format!("{}/repos/{}/{}", GITHUB_API_BASE, owner, repo)
+        repository_with_base(GITHUB_API_BASE, owner, repo)
+    }
+
+    /// Get repository information with custom base URL
+    pub fn repository_with_base(base_url: &str, owner: &str, repo: &str) -> String {
+        format!("{}/repos/{}/{}", base_url, owner, repo)
     }
 
     /// Get branch information
     pub fn branch(owner: &str, repo: &str, branch: &str) -> String {
-        format!(
-            "{}/repos/{}/{}/branches/{}",
-            GITHUB_API_BASE, owner, repo, branch
-        )
+        branch_with_base(GITHUB_API_BASE, owner, repo, branch)
+    }
+
+    /// Get branch information with custom base URL
+    pub fn branch_with_base(base_url: &str, owner: &str, repo: &str, branch: &str) -> String {
+        format!("{}/repos/{}/{}/branches/{}", base_url, owner, repo, branch)
     }
 
     /// Get tag information
     pub fn tag(owner: &str, repo: &str, tag: &str) -> String {
+        tag_with_base(GITHUB_API_BASE, owner, repo, tag)
+    }
+
+    /// Get tag information with custom base URL
+    pub fn tag_with_base(base_url: &str, owner: &str, repo: &str, tag: &str) -> String {
         format!(
             "{}/repos/{}/{}/git/refs/tags/{}",
-            GITHUB_API_BASE, owner, repo, tag
+            base_url, owner, repo, tag
         )
     }
 
     /// Get commit information
     pub fn commit(owner: &str, repo: &str, sha: &str) -> String {
-        format!(
-            "{}/repos/{}/{}/commits/{}",
-            GITHUB_API_BASE, owner, repo, sha
-        )
+        commit_with_base(GITHUB_API_BASE, owner, repo, sha)
+    }
+
+    /// Get commit information with custom base URL
+    pub fn commit_with_base(base_url: &str, owner: &str, repo: &str, sha: &str) -> String {
+        format!("{}/repos/{}/{}/commits/{}", base_url, owner, repo, sha)
     }
 
     /// Search repositories
     pub fn search_repositories(query: &str, num: usize) -> String {
+        search_repositories_with_base(GITHUB_API_BASE, query, num)
+    }
+
+    /// Search repositories with custom base URL
+    pub fn search_repositories_with_base(base_url: &str, query: &str, num: usize) -> String {
         format!(
             "{}/search/repositories?q={}&sort=stars&order=desc&per_page={}",
-            GITHUB_API_BASE,
+            base_url,
             urlencoding::encode(query),
             num
         )
