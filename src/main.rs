@@ -158,15 +158,10 @@ async fn main() -> Result<()> {
         };
 
         // Create output directory if specified
-        if let Some(output_dir) = &cli.output_dir {
-            fs::create_dir_all(output_dir).map_err(|e| {
-                format!(
-                    "Failed to create output directory '{}': {}",
-                    output_dir.display(),
-                    e
-                )
-            })?;
-            jinfo!("Saving assets to: {}", output_dir.display());
+        if let Some(directory) = &cli.directory {
+            fs::create_dir_all(directory)
+                .map_err(|e| format!("Failed to create output directory '{}': {}", directory, e))?;
+            jinfo!("Saving assets to: {}", directory);
         }
 
         // Collect assets to download with filtering
@@ -197,8 +192,8 @@ async fn main() -> Result<()> {
             let size = asset.size;
 
             // Construct output path
-            let output_path = if let Some(output_dir) = &cli.output_dir {
-                output_dir.join(name)
+            let output_path = if let Some(directory) = &cli.directory {
+                PathBuf::from(directory).join(name)
             } else {
                 PathBuf::from(name)
             };

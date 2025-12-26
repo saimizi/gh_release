@@ -1,5 +1,4 @@
 use clap::{ArgAction, Parser};
-use std::path::PathBuf;
 
 /// CLI arguments
 #[derive(Parser)]
@@ -37,10 +36,6 @@ pub struct Cli {
     #[arg(short = 's', long = "search")]
     pub search: Option<String>,
 
-    /// Directory to save downloaded assets (defaults to current directory)
-    #[arg(short = 'o', long = "output-dir")]
-    pub output_dir: Option<PathBuf>,
-
     /// Show information about a specific version, multiple versions can be separated by commas.
     #[arg(short = 'i', long = "info")]
     pub info: Option<String>,
@@ -61,8 +56,10 @@ pub struct Cli {
     #[arg(short = 'c', long = "clone", value_name = "URL[:REF]")]
     pub clone: Option<String>,
 
-    /// Local directory for cloned repository (defaults to repository name)
-    #[arg(value_name = "DIRECTORY", requires = "clone")]
+    /// Directory for operation (clone destination or download location)
+    /// - For clone: defaults to repository name
+    /// - For download: defaults to current directory
+    #[arg(value_name = "DIRECTORY")]
     pub directory: Option<String>,
 
     #[arg(short = 'v', long = "verbose", action = ArgAction::Count)]
