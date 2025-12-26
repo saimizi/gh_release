@@ -41,11 +41,11 @@ pub struct Cli {
     pub info: Option<String>,
 
     /// Number of packages to fetch
-    #[arg(short = 'n', long = "num", default_value_t = 10)]
+    #[arg(short = 'n', long = "num", default_value_t = crate::constants::DEFAULT_NUM_RELEASES)]
     pub num: usize,
 
     /// Maximum number of concurrent downloads
-    #[arg(short = 'j', long = "concurrency", default_value_t = 5)]
+    #[arg(short = 'j', long = "concurrency", default_value_t = crate::constants::DEFAULT_CONCURRENCY)]
     pub concurrency: usize,
 
     /// Clone a repository with optional ref (branch/tag/sha1)

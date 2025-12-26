@@ -1,5 +1,6 @@
 mod auth;
 mod cli;
+mod constants;
 mod errors;
 mod git;
 mod github;
@@ -13,9 +14,9 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use jlogger_tracing::{jdebug, jerror, jinfo, JloggerBuilder, LevelFilter, LogTimeFormat};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
 use reqwest::Client;
-use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::fs;
 
 use clap::Parser;
 
@@ -48,12 +49,12 @@ async fn main() -> Result<()> {
 
     header.insert(
         ACCEPT,
-        HeaderValue::from_static("application/vnd.github.v3+json"),
+        HeaderValue::from_static(constants::headers::ACCEPT_API_V3),
     );
-    header.insert(USER_AGENT, HeaderValue::from_static("gh_release"));
+    header.insert(USER_AGENT, HeaderValue::from_static(constants::USER_AGENT));
     header.insert(
         "X-GitHub-Api-Version",
-        HeaderValue::from_static("2022-11-28"),
+        HeaderValue::from_static(constants::GITHUB_API_VERSION),
     );
 
     if auth::add_auth_header(&cli, &mut header).is_err() {
@@ -67,7 +68,7 @@ async fn main() -> Result<()> {
         jinfo!("Clone mode activated");
 
         // Check git is installed
-        git::check_git_installed()?;
+        git::check_git_installed().await?;
 
         // Parse clone specification
         let spec = git::parse_clone_url(clone_arg)?;
@@ -103,7 +104,7 @@ async fn main() -> Result<()> {
 
         // Execute clone
         jinfo!("Cloning to '{}'...", target_dir);
-        git::execute_git_clone(&clone_url, target_dir, spec.ref_name.as_deref())?;
+        git::execute_git_clone(&clone_url, target_dir, spec.ref_name.as_deref()).await?;
 
         jinfo!("Successfully cloned repository to '{}'", target_dir);
         return Ok(());
@@ -156,7 +157,7 @@ async fn main() -> Result<()> {
 
         // Create output directory if specified
         if let Some(directory) = &cli.directory {
-            fs::create_dir_all(directory)?;
+            fs::create_dir_all(directory).await?;
             jinfo!("Saving assets to: {}", directory);
         }
 
@@ -234,7 +235,7 @@ async fn main() -> Result<()> {
                     // Download with progress tracking
                     let response = client
                         .get(&url)
-                        .header(ACCEPT, "application/octet-stream")
+                        .header(ACCEPT, constants::headers::ACCEPT_OCTET_STREAM)
                         .send()
                         .await
                         .map_err(GhrError::Network)?;
@@ -262,6 +263,7 @@ async fn main() -> Result<()> {
 
                     // Write to file
                     fs::write(&output_path, &bytes_vec)
+                        .await
                         .map_err(GhrError::Io)?;
 
                     Ok(name)

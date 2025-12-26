@@ -1,7 +1,40 @@
+use crate::constants;
 use crate::errors::{GhrError, Result};
 use crate::models::{Release, Repository, RepositoryInfo, SearchResponse};
-use jlogger_tracing::jinfo;
+use jlogger_tracing::{jdebug, jinfo};
 use reqwest::Client;
+use tokio::time::{sleep, Duration};
+
+/// Retry an async operation with exponential backoff
+/// Only retries on network-related errors, not on logical errors like 404
+async fn retry_with_backoff<F, T, Fut>(operation: F) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let max_retries = constants::retry::MAX_RETRIES;
+    let mut attempts = 0;
+
+    loop {
+        match operation().await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                // Only retry on network errors, not on logical errors
+                let should_retry = matches!(e, GhrError::Network(_));
+
+                if should_retry && attempts < max_retries {
+                    let delay =
+                        Duration::from_secs(constants::retry::BASE_DELAY_SECS * 2u64.pow(attempts));
+                    jdebug!("Retry attempt {} after {:?}: {}", attempts + 1, delay, e);
+                    sleep(delay).await;
+                    attempts += 1;
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+    }
+}
 
 /// Fetch release information from GitHub
 pub async fn get_release_info(
@@ -9,33 +42,43 @@ pub async fn get_release_info(
     repo: &str,
     tag: Option<&str>,
 ) -> Result<Vec<Release>> {
-    let url = if let Some(tag) = tag {
-        format!(
-            "https://api.github.com/repos/{}/releases/tags/{}",
-            repo, tag
-        )
-    } else {
-        format!("https://api.github.com/repos/{}/releases", repo)
-    };
-
-    let response = client.get(&url).send().await?;
-
-    if !response.status().is_success() {
-        return Err(GhrError::GitHubApi(format!(
-            "Failed to fetch releases: HTTP {}",
-            response.status()
+    // Parse owner/repo from repo string
+    let parts: Vec<&str> = repo.split('/').collect();
+    if parts.len() != 2 {
+        return Err(GhrError::Generic(format!(
+            "Invalid repository format: {}",
+            repo
         )));
     }
+    let (owner, repo_name) = (parts[0], parts[1]);
 
-    if tag.is_some() {
-        // Single release
-        let release: Release = response.json().await?;
-        Ok(vec![release])
+    let url = if let Some(tag) = tag {
+        constants::endpoints::release_by_tag(owner, repo_name, tag)
     } else {
-        // Multiple releases
-        let releases: Vec<Release> = response.json().await?;
-        Ok(releases)
-    }
+        constants::endpoints::releases(owner, repo_name)
+    };
+
+    retry_with_backoff(|| async {
+        let response = client.get(&url).send().await?;
+
+        if !response.status().is_success() {
+            return Err(GhrError::GitHubApi(format!(
+                "Failed to fetch releases: HTTP {}",
+                response.status()
+            )));
+        }
+
+        if tag.is_some() {
+            // Single release
+            let release: Release = response.json().await?;
+            Ok(vec![release])
+        } else {
+            // Multiple releases
+            let releases: Vec<Release> = response.json().await?;
+            Ok(releases)
+        }
+    })
+    .await
 }
 
 /// Search pattern types
@@ -108,24 +151,23 @@ pub async fn search_repositories(
         }
     };
 
-    let url = format!(
-        "https://api.github.com/search/repositories?q={}&sort=stars&order=desc&per_page={}",
-        urlencoding::encode(&query),
-        num
-    );
+    let url = constants::endpoints::search_repositories(&query, num);
 
-    let response = client.get(&url).send().await?;
+    retry_with_backoff(|| async {
+        let response = client.get(&url).send().await?;
 
-    if !response.status().is_success() {
-        return Err(GhrError::GitHubApi(format!(
-            "Failed to search repositories: HTTP {}",
-            response.status()
-        )));
-    }
+        if !response.status().is_success() {
+            return Err(GhrError::GitHubApi(format!(
+                "Failed to search repositories: HTTP {}",
+                response.status()
+            )));
+        }
 
-    let search_response: SearchResponse = response.json().await?;
+        let search_response: SearchResponse = response.json().await?;
 
-    Ok(search_response.items)
+        Ok(search_response.items)
+    })
+    .await
 }
 
 /// Validate that a repository exists and is accessible
@@ -134,26 +176,29 @@ pub async fn validate_repository(
     owner: &str,
     repo: &str,
 ) -> Result<RepositoryInfo> {
-    let url = format!("https://api.github.com/repos/{}/{}", owner, repo);
+    let url = constants::endpoints::repository(owner, repo);
 
     jinfo!("Validating repository {}/{}...", owner, repo);
 
-    let response = client.get(&url).send().await?;
+    retry_with_backoff(|| async {
+        let response = client.get(&url).send().await?;
 
-    if response.status().is_success() {
-        let repo_info: RepositoryInfo = response.json().await?;
-        Ok(repo_info)
-    } else if response.status() == reqwest::StatusCode::NOT_FOUND {
-        Err(GhrError::RepositoryNotFound {
-            owner: owner.to_string(),
-            repo: repo.to_string(),
-        })
-    } else {
-        Err(GhrError::GitHubApi(format!(
-            "Failed to validate repository: HTTP {}",
-            response.status()
-        )))
-    }
+        if response.status().is_success() {
+            let repo_info: RepositoryInfo = response.json().await?;
+            Ok(repo_info)
+        } else if response.status() == reqwest::StatusCode::NOT_FOUND {
+            Err(GhrError::RepositoryNotFound {
+                owner: owner.to_string(),
+                repo: repo.to_string(),
+            })
+        } else {
+            Err(GhrError::GitHubApi(format!(
+                "Failed to validate repository: HTTP {}",
+                response.status()
+            )))
+        }
+    })
+    .await
 }
 
 /// Validate that a ref (branch/tag/commit) exists in a repository
@@ -166,36 +211,44 @@ pub async fn validate_ref(
     jinfo!("Validating ref '{}'...", ref_name);
 
     // Try as branch first
-    let branch_url = format!(
-        "https://api.github.com/repos/{}/{}/branches/{}",
-        owner, repo, ref_name
-    );
+    let branch_url = constants::endpoints::branch(owner, repo, ref_name);
 
-    let response = client.get(&branch_url).send().await?;
+    let response = retry_with_backoff(|| async {
+        client
+            .get(&branch_url)
+            .send()
+            .await
+            .map_err(GhrError::Network)
+    })
+    .await?;
 
     if response.status().is_success() {
         return Ok("branch".to_string());
     }
 
     // Try as tag
-    let tag_url = format!(
-        "https://api.github.com/repos/{}/{}/git/refs/tags/{}",
-        owner, repo, ref_name
-    );
+    let tag_url = constants::endpoints::tag(owner, repo, ref_name);
 
-    let response = client.get(&tag_url).send().await?;
+    let response = retry_with_backoff(|| async {
+        client.get(&tag_url).send().await.map_err(GhrError::Network)
+    })
+    .await?;
 
     if response.status().is_success() {
         return Ok("tag".to_string());
     }
 
     // Try as commit SHA
-    let commit_url = format!(
-        "https://api.github.com/repos/{}/{}/commits/{}",
-        owner, repo, ref_name
-    );
+    let commit_url = constants::endpoints::commit(owner, repo, ref_name);
 
-    let response = client.get(&commit_url).send().await?;
+    let response = retry_with_backoff(|| async {
+        client
+            .get(&commit_url)
+            .send()
+            .await
+            .map_err(GhrError::Network)
+    })
+    .await?;
 
     if response.status().is_success() {
         return Ok("commit".to_string());

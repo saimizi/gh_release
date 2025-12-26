@@ -111,8 +111,11 @@ pub fn get_repo_name(url: &str) -> String {
 }
 
 /// Check if git is installed and available in PATH
-pub fn check_git_installed() -> Result<()> {
-    let output = std::process::Command::new("git").arg("--version").output();
+pub async fn check_git_installed() -> Result<()> {
+    let output = tokio::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .await;
 
     match output {
         Ok(output) if output.status.success() => {
@@ -137,7 +140,11 @@ pub fn construct_clone_url(owner: &str, repo: &str, token: Option<&str>) -> Stri
 }
 
 /// Execute git clone command
-pub fn execute_git_clone(clone_url: &str, target_dir: &str, ref_name: Option<&str>) -> Result<()> {
+pub async fn execute_git_clone(
+    clone_url: &str,
+    target_dir: &str,
+    ref_name: Option<&str>,
+) -> Result<()> {
     // Check target directory doesn't exist
     if std::path::Path::new(target_dir).exists() {
         return Err(GhrError::Generic(format!(
@@ -148,11 +155,12 @@ pub fn execute_git_clone(clone_url: &str, target_dir: &str, ref_name: Option<&st
 
     // Execute git clone
     jinfo!("Executing: git clone <url> {}", target_dir);
-    let output = std::process::Command::new("git")
+    let output = tokio::process::Command::new("git")
         .arg("clone")
         .arg(clone_url)
         .arg(target_dir)
         .output()
+        .await
         .map_err(|e| GhrError::GitCommand(format!("Failed to execute git clone: {}", e)))?;
 
     if !output.status.success() {
@@ -175,12 +183,13 @@ pub fn execute_git_clone(clone_url: &str, target_dir: &str, ref_name: Option<&st
     // Checkout specific ref if provided
     if let Some(ref_name) = ref_name {
         jinfo!("Checking out ref '{}'...", ref_name);
-        let output = std::process::Command::new("git")
+        let output = tokio::process::Command::new("git")
             .arg("-C")
             .arg(target_dir)
             .arg("checkout")
             .arg(ref_name)
             .output()
+            .await
             .map_err(|e| GhrError::GitCommand(format!("Failed to execute git checkout: {}", e)))?;
 
         if !output.status.success() {
