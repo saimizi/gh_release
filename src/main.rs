@@ -212,6 +212,25 @@ impl Display for Repository {
     }
 }
 
+/// Clone specification parsed from user input
+#[derive(Debug)]
+struct CloneSpec {
+    owner: String,
+    repo: String,
+    ref_name: Option<String>,
+    original_url: String,
+}
+
+/// Repository info from GitHub API
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct RepositoryInfo {
+    name: String,
+    full_name: String,
+    default_branch: String,
+    private: bool,
+}
+
 type Result<T> = std::result::Result<T, String>;
 
 /// CLI arguments
@@ -263,8 +282,20 @@ struct Cli {
     num: usize,
 
     /// Maximum number of concurrent downloads
-    #[arg(short = 'c', long = "concurrency", default_value_t = 5)]
+    #[arg(short = 'j', long = "concurrency", default_value_t = 5)]
     concurrency: usize,
+
+    /// Clone a repository with optional ref (branch/tag/sha1)
+    /// Format: <url>[:<ref>] where url can be:
+    ///   - https://github.com/owner/repo
+    ///   - git@github.com:owner/repo.git
+    ///   - owner/repo (short format)
+    #[arg(short = 'c', long = "clone", value_name = "URL[:REF]")]
+    clone: Option<String>,
+
+    /// Local directory for cloned repository (defaults to repository name)
+    #[arg(value_name = "DIRECTORY", requires = "clone")]
+    directory: Option<String>,
 
     #[arg(short = 'v', long = "verbose", action = ArgAction::Count)]
     verbose: u8,
@@ -274,10 +305,10 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Validate that either --repo or --search is provided
-    if cli.repo.is_none() && cli.search.is_none() {
+    // Validate that either --repo, --search, or --clone is provided
+    if cli.repo.is_none() && cli.search.is_none() && cli.clone.is_none() {
         return Err(
-            "Either --repo or --search must be provided. Use --help for more information."
+            "Either --repo, --search, or --clone must be provided. Use --help for more information."
                 .to_string(),
         );
     }
@@ -315,6 +346,53 @@ async fn main() -> Result<()> {
         .default_headers(header)
         .build()
         .map_err(|e| e.to_string())?;
+
+    // CLONE MODE - handle repository cloning
+    if let Some(clone_arg) = cli.clone.as_deref() {
+        jinfo!("Clone mode activated");
+
+        // Check git is installed
+        check_git_installed()?;
+
+        // Parse clone specification
+        let spec = parse_clone_url(clone_arg)?;
+        jinfo!("Cloning repository: {}/{}", spec.owner, spec.repo);
+
+        // Validate repository exists
+        let repo_info = validate_repository(&client, &spec.owner, &spec.repo).await?;
+        jinfo!(
+            "Repository found: {} ({})",
+            repo_info.full_name,
+            if repo_info.private {
+                "private"
+            } else {
+                "public"
+            }
+        );
+
+        // Validate ref if specified
+        if let Some(ref_name) = spec.ref_name.as_ref() {
+            let ref_type = validate_ref(&client, &spec.owner, &spec.repo, ref_name).await?;
+            jinfo!("Reference '{}' found (type: {})", ref_name, ref_type);
+        }
+
+        // Determine target directory
+        let default_dir = get_repo_name(&spec.original_url);
+        let target_dir = cli.directory.as_deref().unwrap_or(&default_dir);
+
+        // Extract token from CLI for clone URL
+        let token = extract_token_from_cli(&cli);
+
+        // Construct clone URL with auth if available
+        let clone_url = construct_clone_url(&spec.owner, &spec.repo, token.as_deref());
+
+        // Execute clone
+        jinfo!("Cloning to '{}'...", target_dir);
+        execute_git_clone(&clone_url, target_dir, spec.ref_name.as_deref())?;
+
+        jinfo!("Successfully cloned repository to '{}'", target_dir);
+        return Ok(());
+    }
 
     // SEARCH MODE - handle repository search
     if let Some(search_pattern) = cli.search.as_deref() {
@@ -760,6 +838,234 @@ fn add_auth_header(cli: &Cli, header: &mut HeaderMap) -> Result<()> {
     }
 }
 
+/// Validate that a repository exists and is accessible
+async fn validate_repository(client: &Client, owner: &str, repo: &str) -> Result<RepositoryInfo> {
+    let url = format!("https://api.github.com/repos/{}/{}", owner, repo);
+
+    jinfo!("Validating repository {}/{}...", owner, repo);
+
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to connect to GitHub API: {}", e))?;
+
+    if response.status().is_success() {
+        let repo_info: RepositoryInfo = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse repository response: {}", e))?;
+        Ok(repo_info)
+    } else if response.status() == reqwest::StatusCode::NOT_FOUND {
+        Err(format!(
+            "Repository '{}/{}' not found (or you don't have access)",
+            owner, repo
+        ))
+    } else {
+        Err(format!(
+            "GitHub API request failed with status: {}",
+            response.status()
+        ))
+    }
+}
+
+/// Validate that a ref (branch/tag/commit) exists in a repository
+async fn validate_ref(client: &Client, owner: &str, repo: &str, ref_name: &str) -> Result<String> {
+    jinfo!("Validating ref '{}'...", ref_name);
+
+    // Try as branch first
+    let branch_url = format!(
+        "https://api.github.com/repos/{}/{}/branches/{}",
+        owner, repo, ref_name
+    );
+
+    let response = client.get(&branch_url).send().await.map_err(|e| {
+        format!(
+            "Failed to connect to GitHub API while checking branch: {}",
+            e
+        )
+    })?;
+
+    if response.status().is_success() {
+        return Ok("branch".to_string());
+    }
+
+    // Try as tag
+    let tag_url = format!(
+        "https://api.github.com/repos/{}/{}/git/refs/tags/{}",
+        owner, repo, ref_name
+    );
+
+    let response = client
+        .get(&tag_url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to connect to GitHub API while checking tag: {}", e))?;
+
+    if response.status().is_success() {
+        return Ok("tag".to_string());
+    }
+
+    // Try as commit SHA
+    let commit_url = format!(
+        "https://api.github.com/repos/{}/{}/commits/{}",
+        owner, repo, ref_name
+    );
+
+    let response = client.get(&commit_url).send().await.map_err(|e| {
+        format!(
+            "Failed to connect to GitHub API while checking commit: {}",
+            e
+        )
+    })?;
+
+    if response.status().is_success() {
+        return Ok("commit".to_string());
+    }
+
+    // Ref not found
+    Err(format!(
+        "Branch/tag/commit '{}' not found in repository '{}/{}'",
+        ref_name, owner, repo
+    ))
+}
+
+/// Check if git is installed and available in PATH
+fn check_git_installed() -> Result<()> {
+    let output = std::process::Command::new("git").arg("--version").output();
+
+    match output {
+        Ok(output) if output.status.success() => {
+            jdebug!(
+                "Git version: {}",
+                String::from_utf8_lossy(&output.stdout).trim()
+            );
+            Ok(())
+        }
+        Ok(_) => Err("Git command failed. Please ensure git is properly installed.".to_string()),
+        Err(_) => Err(
+            "Git is not installed or not in PATH. Please install git to use the clone feature."
+                .to_string(),
+        ),
+    }
+}
+
+/// Construct clone URL with optional authentication
+fn construct_clone_url(owner: &str, repo: &str, token: Option<&str>) -> String {
+    if let Some(token) = token {
+        format!("https://{}@github.com/{}/{}.git", token, owner, repo)
+    } else {
+        format!("https://github.com/{}/{}.git", owner, repo)
+    }
+}
+
+/// Extract token from CLI arguments
+fn extract_token_from_cli(cli: &Cli) -> Option<String> {
+    // Try direct token first
+    if let Some(token) = &cli.token {
+        return Some(token.clone());
+    }
+
+    // Try token file
+    if let Some(token_file) = &cli.token_file {
+        if let Ok(token) = std::fs::read_to_string(token_file) {
+            return Some(token.trim().to_string());
+        }
+    }
+
+    // Try .netrc
+    if let Ok(home) = std::env::var("HOME") {
+        let netrc_path = std::path::Path::new(&home).join(".netrc");
+        if let Ok(content) = std::fs::read_to_string(&netrc_path) {
+            let lines: Vec<&str> = content.lines().collect();
+            let mut in_github = false;
+            for line in lines {
+                let trimmed = line.trim();
+                if trimmed.starts_with("machine") && trimmed.contains("github.com") {
+                    in_github = true;
+                } else if in_github && trimmed.starts_with("password") {
+                    if let Some(password) = trimmed.split_whitespace().nth(1) {
+                        return Some(password.to_string());
+                    }
+                } else if trimmed.starts_with("machine") {
+                    in_github = false;
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Execute git clone command
+fn execute_git_clone(clone_url: &str, target_dir: &str, ref_name: Option<&str>) -> Result<()> {
+    // Check target directory doesn't exist
+    if std::path::Path::new(target_dir).exists() {
+        return Err(format!(
+            "Directory '{}' already exists. Please remove it or choose a different name.",
+            target_dir
+        ));
+    }
+
+    // Execute git clone
+    jinfo!("Executing: git clone <url> {}", target_dir);
+    let output = std::process::Command::new("git")
+        .arg("clone")
+        .arg(clone_url)
+        .arg(target_dir)
+        .output()
+        .map_err(|e| format!("Failed to execute git clone: {}", e))?;
+
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr);
+        cleanup_partial_clone(target_dir);
+        return Err(format!("Git clone failed: {}", error.trim()));
+    }
+
+    // Show git output
+    if !output.stdout.is_empty() {
+        eprintln!("{}", String::from_utf8_lossy(&output.stdout));
+    }
+    if !output.stderr.is_empty() {
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    // Checkout specific ref if provided
+    if let Some(ref_name) = ref_name {
+        jinfo!("Checking out ref '{}'...", ref_name);
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(target_dir)
+            .arg("checkout")
+            .arg(ref_name)
+            .output()
+            .map_err(|e| format!("Failed to execute git checkout: {}", e))?;
+
+        if !output.status.success() {
+            let error = String::from_utf8_lossy(&output.stderr);
+            cleanup_partial_clone(target_dir);
+            return Err(format!("Git checkout failed: {}", error.trim()));
+        }
+
+        if !output.stderr.is_empty() {
+            eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        }
+    }
+
+    Ok(())
+}
+
+/// Attempt to cleanup partial clone on failure
+fn cleanup_partial_clone(dir: &str) {
+    jinfo!("Attempting to cleanup partial clone at '{}'...", dir);
+    if let Err(e) = std::fs::remove_dir_all(dir) {
+        jwarn!("Failed to cleanup directory '{}': {}", dir, e);
+        jwarn!("Please manually remove the directory if it exists.");
+    } else {
+        jinfo!("Cleanup successful.");
+    }
+}
+
 #[derive(Debug)]
 enum SearchPattern {
     UserWithKeyword { username: String, keyword: String },
@@ -804,6 +1110,104 @@ fn parse_search_pattern(pattern: &str) -> Result<SearchPattern> {
             keyword: pattern.to_string(),
         })
     }
+}
+
+/// Parse clone URL and extract owner, repo, and optional ref
+fn parse_clone_url(url: &str) -> Result<CloneSpec> {
+    let url = url.trim();
+
+    if url.is_empty() {
+        return Err("Clone URL cannot be empty".to_string());
+    }
+
+    // Split by ':' to separate URL and optional ref
+    let parts: Vec<&str> = url.splitn(2, ':').collect();
+    let (url_part, ref_name) = if parts.len() == 2 {
+        // Check if this is an SSH URL (contains '@') or HTTPS with ref
+        if parts[0].contains('@') || parts[0].starts_with("https") || parts[0].starts_with("http") {
+            // This is a full URL, not a ref separator
+            (url, None)
+        } else {
+            // This is URL:ref format (e.g., owner/repo:branch)
+            (parts[0], Some(parts[1].to_string()))
+        }
+    } else {
+        (url, None)
+    };
+
+    // Extract owner and repo from URL
+    let (owner, repo) = if url_part.starts_with("https://github.com/")
+        || url_part.starts_with("http://github.com/")
+    {
+        // HTTPS URL: https://github.com/owner/repo or https://github.com/owner/repo.git
+        let path = url_part
+            .trim_start_matches("https://github.com/")
+            .trim_start_matches("http://github.com/")
+            .trim_end_matches(".git");
+
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() < 2 {
+            return Err(format!("Invalid GitHub URL: {}", url_part));
+        }
+        (parts[0].to_string(), parts[1].to_string())
+    } else if url_part.starts_with("git@github.com:") {
+        // SSH URL: git@github.com:owner/repo.git
+        let path = url_part
+            .trim_start_matches("git@github.com:")
+            .trim_end_matches(".git");
+
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() < 2 {
+            return Err(format!("Invalid GitHub SSH URL: {}", url_part));
+        }
+        (parts[0].to_string(), parts[1].to_string())
+    } else if url_part.contains('/') {
+        // Short format: owner/repo
+        let parts: Vec<&str> = url_part.split('/').collect();
+        if parts.len() < 2 {
+            return Err(format!("Invalid repository format: {}", url_part));
+        }
+        (
+            parts[0].to_string(),
+            parts[1].trim_end_matches(".git").to_string(),
+        )
+    } else {
+        return Err(format!(
+            "Unsupported URL format: {}. Use 'owner/repo', 'https://github.com/owner/repo', or 'git@github.com:owner/repo.git'",
+            url_part
+        ));
+    };
+
+    if owner.is_empty() || repo.is_empty() {
+        return Err("Owner and repository name cannot be empty".to_string());
+    }
+
+    Ok(CloneSpec {
+        owner,
+        repo,
+        ref_name,
+        original_url: url_part.to_string(),
+    })
+}
+
+/// Extract repository name from URL for default directory name
+fn get_repo_name(url: &str) -> String {
+    // Try to parse the URL first
+    if let Ok(spec) = parse_clone_url(url) {
+        return spec.repo;
+    }
+
+    // Fallback: extract from URL manually
+    let url = url.trim().trim_end_matches(".git");
+
+    if let Some(last_part) = url.split('/').next_back() {
+        if !last_part.is_empty() {
+            return last_part.to_string();
+        }
+    }
+
+    // Final fallback
+    "cloned-repo".to_string()
 }
 
 #[cfg(test)]
@@ -979,5 +1383,100 @@ mod tests {
         let summary = repo.summary();
         assert!(summary.contains("org/popular-repo"));
         assert!(summary.contains("123456"));
+    }
+
+    // Tests for parse_clone_url function
+    #[test]
+    fn test_parse_clone_url_https() {
+        let spec = parse_clone_url("https://github.com/owner/repo").unwrap();
+        assert_eq!(spec.owner, "owner");
+        assert_eq!(spec.repo, "repo");
+        assert_eq!(spec.ref_name, None);
+    }
+
+    #[test]
+    fn test_parse_clone_url_https_with_git() {
+        let spec = parse_clone_url("https://github.com/owner/repo.git").unwrap();
+        assert_eq!(spec.owner, "owner");
+        assert_eq!(spec.repo, "repo");
+        assert_eq!(spec.ref_name, None);
+    }
+
+    #[test]
+    fn test_parse_clone_url_ssh() {
+        let spec = parse_clone_url("git@github.com:owner/repo.git").unwrap();
+        assert_eq!(spec.owner, "owner");
+        assert_eq!(spec.repo, "repo");
+        assert_eq!(spec.ref_name, None);
+    }
+
+    #[test]
+    fn test_parse_clone_url_short_format() {
+        let spec = parse_clone_url("owner/repo").unwrap();
+        assert_eq!(spec.owner, "owner");
+        assert_eq!(spec.repo, "repo");
+        assert_eq!(spec.ref_name, None);
+    }
+
+    #[test]
+    fn test_parse_clone_url_with_ref() {
+        let spec = parse_clone_url("owner/repo:main").unwrap();
+        assert_eq!(spec.owner, "owner");
+        assert_eq!(spec.repo, "repo");
+        assert_eq!(spec.ref_name, Some("main".to_string()));
+    }
+
+    #[test]
+    fn test_parse_clone_url_with_branch() {
+        let spec = parse_clone_url("saimizi/gh_release:feature/new-feature").unwrap();
+        assert_eq!(spec.owner, "saimizi");
+        assert_eq!(spec.repo, "gh_release");
+        assert_eq!(spec.ref_name, Some("feature/new-feature".to_string()));
+    }
+
+    #[test]
+    fn test_parse_clone_url_with_tag() {
+        let spec = parse_clone_url("owner/repo:v1.2.3").unwrap();
+        assert_eq!(spec.owner, "owner");
+        assert_eq!(spec.repo, "repo");
+        assert_eq!(spec.ref_name, Some("v1.2.3".to_string()));
+    }
+
+    #[test]
+    fn test_parse_clone_url_invalid_empty() {
+        let result = parse_clone_url("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty"));
+    }
+
+    #[test]
+    fn test_parse_clone_url_invalid_format() {
+        let result = parse_clone_url("invalid");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_repo_name_https() {
+        assert_eq!(get_repo_name("https://github.com/owner/my-repo"), "my-repo");
+    }
+
+    #[test]
+    fn test_get_repo_name_https_with_git() {
+        assert_eq!(get_repo_name("https://github.com/owner/repo.git"), "repo");
+    }
+
+    #[test]
+    fn test_get_repo_name_short() {
+        assert_eq!(get_repo_name("owner/my-repo"), "my-repo");
+    }
+
+    #[test]
+    fn test_get_repo_name_ssh() {
+        assert_eq!(get_repo_name("git@github.com:owner/repo.git"), "repo");
+    }
+
+    #[test]
+    fn test_get_repo_name_with_ref() {
+        assert_eq!(get_repo_name("owner/repo:main"), "repo");
     }
 }
