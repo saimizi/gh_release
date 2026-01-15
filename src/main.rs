@@ -27,9 +27,9 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Validate that either --repo, --search, or --clone is provided
-    if cli.repo.is_none() && cli.search.is_none() && cli.clone.is_none() {
+    if cli.repo.is_none() && cli.search.is_none() && cli.clone.is_none() && cli.get_file.is_none() {
         return Err(GhrError::MissingArgument(
-            "Either --repo, --search, or --clone must be provided. Use --help for more information."
+            "Either --repo, --search, --get-file or --clone must be provided. Use --help for more information."
                 .to_string(),
         ));
     }
@@ -197,6 +197,61 @@ async fn main() -> Result<()> {
                 eprintln!("\nFound {} repositories", repositories.len());
             }
         }
+
+        return Ok(());
+    }
+
+    // Download file.
+    if let Some(f) = cli.get_file.as_deref() {
+        let download_url = git::get_raw_file_url(f);
+        jinfo!("Downloading file from URL: {}", download_url);
+
+        let client = Arc::new(client);
+        let multi_progress = Arc::new(MultiProgress::new());
+
+        // Create progress bar for this asset
+        let pb = multi_progress.add(ProgressBar::new(100));
+        pb.set_style(
+                        ProgressStyle::default_bar()
+                            .template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+                            .unwrap()
+                            .progress_chars("#>-"),
+                    );
+        pb.set_message(format!("Downloading: {}", f));
+
+        let response = client
+            .get(&download_url)
+            .header(ACCEPT, constants::headers::ACCEPT_OCTET_STREAM)
+            .send()
+            .await
+            .map_err(GhrError::Network)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            pb.finish_with_message(format!("Failed: {} (HTTP {})", f, status));
+            return Err(GhrError::GitHubApi(format!("HTTP {} for '{}'", status, f)));
+        }
+
+        let mut downloaded: u64 = 0;
+        let mut bytes_vec = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.map_err(GhrError::Network)?;
+            downloaded += chunk.len() as u64;
+            bytes_vec.extend_from_slice(&chunk);
+            pb.set_position(downloaded);
+        }
+        pb.finish_with_message(format!("Complete: {}", f));
+
+        let output_path = if let Some(directory) = &cli.directory {
+            PathBuf::from(directory).join(PathBuf::from(f).file_name().unwrap())
+        } else {
+            PathBuf::from(PathBuf::from(f).file_name().unwrap())
+        };
+
+        fs::write(&output_path, &bytes_vec)
+            .await
+            .map_err(GhrError::Io)?;
 
         return Ok(());
     }

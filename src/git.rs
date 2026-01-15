@@ -139,6 +139,12 @@ pub fn construct_clone_url(owner: &str, repo: &str, token: Option<&str>) -> Stri
     }
 }
 
+pub fn get_raw_file_url(plain_download_url: &str) -> String {
+    plain_download_url
+        .replace("blob", "refs/heads")
+        .replace("github.com", "raw.githubusercontent.com")
+}
+
 /// Execute git clone command
 pub async fn execute_git_clone(
     clone_url: &str,
