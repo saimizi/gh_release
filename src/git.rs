@@ -139,6 +139,52 @@ pub fn construct_clone_url(owner: &str, repo: &str, token: Option<&str>) -> Stri
     }
 }
 
+pub fn get_raw_file_url(plain_download_url: &str) -> Result<String> {
+    // Expected format: https://github.com/{owner}/{repo}/blob/{ref}/{path}
+    // Convert to: https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}
+
+    let url = plain_download_url.trim();
+
+    // Basic validation
+    if !url.starts_with("https://github.com/") && !url.starts_with("http://github.com/") {
+        return Err(GhrError::InvalidUrl {
+            url: "URL must be a GitHub URL starting with https://github.com/".to_string(),
+        });
+    }
+
+    // Remove protocol
+    let without_protocol = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+
+    // Split into parts: github.com/{owner}/{repo}/blob/{ref}/{path}
+    let parts: Vec<&str> = without_protocol.split('/').collect();
+
+    if parts.len() < 5 {
+        return Err(GhrError::InvalidUrl {
+            url: format!("Invalid GitHub URL format. Expected: https://github.com/{{owner}}/{{repo}}/blob/{{ref}}/{{path}}, got: {}", url)
+        });
+    }
+
+    // Verify it's a blob URL
+    if parts[3] != "blob" {
+        return Err(GhrError::InvalidUrl {
+            url: format!("URL must contain '/blob/' segment. Expected format: https://github.com/{{owner}}/{{repo}}/blob/{{ref}}/{{path}}")
+        });
+    }
+
+    let owner = parts[1];
+    let repo = parts[2];
+    let ref_name = parts[4];
+    let path = parts[5..].join("/");
+
+    // Construct raw URL: https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}
+    Ok(format!(
+        "https://raw.githubusercontent.com/{}/{}/{}/{}",
+        owner, repo, ref_name, path
+    ))
+}
+
 /// Execute git clone command
 pub async fn execute_git_clone(
     clone_url: &str,

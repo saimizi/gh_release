@@ -16,6 +16,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use jlogger_tracing::{jdebug, jerror, jinfo, JloggerBuilder, LevelFilter, LogTimeFormat};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, USER_AGENT};
 use reqwest::Client;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
@@ -27,9 +28,9 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Validate that either --repo, --search, or --clone is provided
-    if cli.repo.is_none() && cli.search.is_none() && cli.clone.is_none() {
+    if cli.repo.is_none() && cli.search.is_none() && cli.clone.is_none() && cli.get_file.is_none() {
         return Err(GhrError::MissingArgument(
-            "Either --repo, --search, or --clone must be provided. Use --help for more information."
+            "Either --repo, --search, --get-file or --clone must be provided. Use --help for more information."
                 .to_string(),
         ));
     }
@@ -197,6 +198,97 @@ async fn main() -> Result<()> {
                 eprintln!("\nFound {} repositories", repositories.len());
             }
         }
+
+        return Ok(());
+    }
+
+    // Download file.
+    if let Some(f) = cli.get_file.as_deref() {
+        let download_url = git::get_raw_file_url(f)?;
+        jinfo!("Downloading file from URL: {}", download_url);
+
+        // Determine output path
+        let output_path =
+            if let Some(directory) = &cli.directory {
+                PathBuf::from(directory).join(PathBuf::from(f).file_name().ok_or_else(|| {
+                    GhrError::Generic("Cannot extract filename from URL".to_string())
+                })?)
+            } else {
+                PathBuf::from(PathBuf::from(f).file_name().ok_or_else(|| {
+                    GhrError::Generic("Cannot extract filename from URL".to_string())
+                })?)
+            };
+
+        // Check if file exists and prompt user for confirmation
+        if output_path.exists() {
+            print!(
+                "File '{}' already exists. Overwrite? [y/N]: ",
+                output_path.display()
+            );
+            io::stdout().flush().unwrap();
+
+            let mut response = String::new();
+            io::stdin()
+                .read_line(&mut response)
+                .map_err(|e| GhrError::Generic(format!("Failed to read user input: {}", e)))?;
+
+            let response = response.trim().to_lowercase();
+            if response != "y" && response != "yes" {
+                jinfo!("Download cancelled by user");
+                return Ok(());
+            }
+        }
+
+        let client = Arc::new(client);
+        let multi_progress = Arc::new(MultiProgress::new());
+
+        let response = client
+            .get(&download_url)
+            .header(ACCEPT, constants::headers::ACCEPT_OCTET_STREAM)
+            .send()
+            .await
+            .map_err(GhrError::Network)?;
+
+        let status = response.status();
+        if !status.is_success() {
+            return Err(GhrError::GitHubApi(format!("HTTP {} for '{}'", status, f)));
+        }
+
+        // Get content length for accurate progress bar
+        let total_size = response.content_length().unwrap_or(0);
+
+        // Create progress bar with actual file size
+        let pb = multi_progress.add(ProgressBar::new(total_size));
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{msg}\n{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+        pb.set_message(format!(
+            "Downloading: {}",
+            output_path.file_name().unwrap().to_string_lossy()
+        ));
+
+        let mut downloaded: u64 = 0;
+        let mut bytes_vec = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result.map_err(GhrError::Network)?;
+            downloaded += chunk.len() as u64;
+            bytes_vec.extend_from_slice(&chunk);
+            pb.set_position(downloaded);
+        }
+        pb.finish_with_message(format!(
+            "Complete: {}",
+            output_path.file_name().unwrap().to_string_lossy()
+        ));
+
+        fs::write(&output_path, &bytes_vec)
+            .await
+            .map_err(GhrError::Io)?;
+
+        jinfo!("File saved to: {}", output_path.display());
 
         return Ok(());
     }

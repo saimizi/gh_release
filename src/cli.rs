@@ -88,6 +88,10 @@ pub struct Cli {
     #[arg(long = "cache")]
     pub cache: bool,
 
+    /// Download a specific file from a repository which requires a token.
+    #[arg(short = 'g', long = "get-file")]
+    pub get_file: Option<String>,
+
     #[arg(short = 'v', long = "verbose", action = ArgAction::Count)]
     pub verbose: u8,
 }
