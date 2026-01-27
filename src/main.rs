@@ -332,6 +332,17 @@ async fn main() -> Result<()> {
             Vec::new()
         };
 
+        // Parse owner/repo for API URL construction
+        let parts: Vec<&str> = repo.split('/').collect();
+        if parts.len() != 2 {
+            return Err(GhrError::Generic(format!(
+                "Invalid repository format '{}'. Expected 'owner/repo'",
+                repo
+            )));
+        }
+        let owner = parts[0];
+        let repo_name = parts[1];
+
         // Collect assets to download with filtering
         let mut assets_to_download = Vec::new();
         for asset in &release.assets {
@@ -343,8 +354,12 @@ async fn main() -> Result<()> {
                 continue;
             }
 
-            // Get download URL
-            let download_url = &asset.browser_download_url;
+            // Use API URL for downloading (works with private repos)
+            // Format: https://api.github.com/repos/{owner}/{repo}/releases/assets/{asset_id}
+            let download_url = format!(
+                "{}/repos/{}/{}/releases/assets/{}",
+                cli.api_url, owner, repo_name, asset.id
+            );
 
             // Get asset size for progress bar
             let size = asset.size;
@@ -356,7 +371,7 @@ async fn main() -> Result<()> {
                 PathBuf::from(name)
             };
 
-            assets_to_download.push((name.clone(), download_url.clone(), output_path, size));
+            assets_to_download.push((name.clone(), download_url, output_path, size));
         }
 
         if assets_to_download.is_empty() {

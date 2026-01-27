@@ -4,6 +4,7 @@ use std::fmt::Display;
 /// GitHub release asset
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Asset {
+    pub id: u64,
     pub name: String,
     pub browser_download_url: String,
     pub size: u64,
